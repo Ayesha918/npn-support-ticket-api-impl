@@ -1,0 +1,448 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:jms="http://www.mulesoft.org/schema/mule/jms"
+      xmlns:email="http://www.mulesoft.org/schema/mule/email"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+        http://www.mulesoft.org/schema/mule/jms http://www.mulesoft.org/schema/mule/jms/current/mule-jms.xsd
+        http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd">
+
+    <http:listener-config name="npn-support-ticket-api-httpListenerConfig">
+        <http:listener-connection host="${http.host}" port="${http.port}" />
+    </http:listener-config>
+
+    <apikit:config name="npn-support-ticket-api-config" api="resource::ec8673e6-03eb-4062-bc33-e6ca888fddea:npn-support-ticket-api:1.0.0:raml:zip:npn-support-ticket-api.raml" outboundHeadersMapName="outboundHeaders" httpStatusVarName="httpStatus" />
+
+    <!-- Main APIkit Router Flow -->
+    <flow name="npn-support-ticket-api-main">
+        <http:listener config-ref="npn-support-ticket-api-httpListenerConfig" path="${api.basePath}">
+            <http:response statusCode="#[vars.httpStatus default 200]">
+                <http:headers><![CDATA[#[vars.outboundHeaders default {}]]]></http:headers>
+            </http:response>
+            <http:error-response statusCode="#[vars.httpStatus default 500]">
+                <http:body><![CDATA[#[payload]]]></http:body>
+                <http:headers><![CDATA[#[vars.outboundHeaders default {}]]]></http:headers>
+            </http:error-response>
+        </http:listener>
+        <apikit:router config-ref="npn-support-ticket-api-config" />
+    </flow>
+
+    <!-- APIkit Console Flow -->
+    <flow name="npn-support-ticket-api-console">
+        <http:listener config-ref="npn-support-ticket-api-httpListenerConfig" path="/console/*">
+            <http:response statusCode="#[vars.httpStatus default 200]">
+                <http:headers>#[vars.outboundHeaders default {}]</http:headers>
+            </http:response>
+            <http:error-response statusCode="#[vars.httpStatus default 500]">
+                <http:body>#[payload]</http:body>
+                <http:headers>#[vars.outboundHeaders default {}]</http:headers>
+            </http:error-response>
+        </http:listener>
+        <apikit:console config-ref="npn-support-ticket-api-config" />
+    </flow>
+
+    <!-- POST /tickets: Ticket Capture, Validation, Routing, Persistence, Queue & Email -->
+    <flow name="post:\tickets:application\json:npn-support-ticket-api-config">
+        <set-variable variableName="requestId" value="#[attributes.headers.'x-request-id' default ('REQ-' ++ uuid()[0 to 7])]" doc:name="Set requestId"/>
+        <set-variable variableName="correlationId" value="#[vars.requestId]" doc:name="Set correlationId"/>
+        <logger level="INFO" message="#['[' ++ vars.correlationId ++ '] Create ticket received']" doc:name="Log request"/>
+        <set-variable variableName="ticketRequest" value="#[payload]" doc:name="Keep request body"/>
+
+        <!-- 1. Input Constraints Validation (PDF Requirement 2) -->
+        <ee:transform doc:name="Collect validation errors">
+            <ee:message/>
+            <ee:variables>
+                <ee:set-variable variableName="validationErrors"><![CDATA[%dw 2.0
+output application/java
+var maxLen = p('ticket.description.maxLength') as Number
+var categories = p('ticket.categories') splitBy ","
+---
+[
+  if (isBlank(payload.subject)) { field: "subject", code: "REQUIRED", message: "subject must not be blank." } else null,
+  if (isBlank(payload.description)) { field: "description", code: "REQUIRED", message: "description must not be blank." } else null,
+  if (sizeOf(payload.description default "") > maxLen) { field: "description", code: "TOO_LONG", message: "description exceeds the maximum length of $(maxLen) characters." } else null,
+  if (!isBlank(payload.categoryCode) and not (categories contains payload.categoryCode)) { field: "categoryCode", code: "INVALID_CATEGORY", message: "categoryCode is not in the configured list." } else null
+] filter ($ != null)]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+
+        <choice doc:name="Any validation errors?">
+            <when expression="#[sizeOf(vars.validationErrors) > 0]">
+                <raise-error type="CUSTOM:VALIDATION_FAILED" description="Request validation failed." doc:name="Raise validation error"/>
+            </when>
+        </choice>
+
+        <!-- 2. Idempotent Capture Check (PDF Requirement 3) -->
+        <flow-ref name="${impl.findTicket}" doc:name="Find ticket by request id"/>
+
+        <choice doc:name="Duplicate request?">
+            <when expression="#[payload != null]">
+                <logger level="INFO" message="#['[' ++ vars.correlationId ++ '] Duplicate request, returning original ticket']" doc:name="Log duplicate"/>
+                <ee:transform doc:name="Duplicate response">
+                    <ee:message><ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{ ticketId: payload.ticketId, status: payload.status, duplicateOfRequestId: true }]]></ee:set-payload></ee:message>
+                    <ee:variables>
+                        <ee:set-variable variableName="httpStatus">200</ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+            </when>
+            <otherwise>
+                <!-- 3. Resolve Customer & Product (PDF Requirement 2 -> 422 Errors) -->
+                <set-variable variableName="customerId" value="#[vars.ticketRequest.customerId]" doc:name="Set customerId"/>
+                <set-variable variableName="productCode" value="#[vars.ticketRequest.productCode]" doc:name="Set productCode"/>
+
+                <flow-ref name="${impl.getCustomer}" doc:name="Get customer"/>
+                <choice doc:name="Customer found?">
+                    <when expression="#[payload == null]">
+                        <raise-error type="CUSTOM:UNKNOWN_CUSTOMER" description="#['customerId ' ++ vars.customerId ++ ' was not found.']" doc:name="Unknown customer"/>
+                    </when>
+                    <otherwise>
+                        <set-variable variableName="customerTier" value="#[payload.tier]" doc:name="Set customerTier"/>
+                    </otherwise>
+                </choice>
+
+                <flow-ref name="${impl.getProduct}" doc:name="Get product"/>
+                <choice doc:name="Product found?">
+                    <when expression="#[payload == null]">
+                        <raise-error type="CUSTOM:UNKNOWN_PRODUCT" description="#['productCode ' ++ vars.productCode ++ ' was not found.']" doc:name="Unknown product"/>
+                    </when>
+                </choice>
+
+                <!-- 4. Table-driven Intelligent Routing via Salesforce-->
+                <ee:transform doc:name="Build routing input">
+                    <ee:message><ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+{
+  categoryCode: vars.ticketRequest.categoryCode,
+  productCode: vars.ticketRequest.productCode,
+  customerTier: vars.customerTier,
+  statedSeverity: vars.ticketRequest.statedSeverity
+}]]></ee:set-payload></ee:message>
+                </ee:transform>
+                <flow-ref name="${impl.routeTicket}" doc:name="Route ticket"/>
+                <set-variable variableName="routing" value="#[payload]" doc:name="Keep routing result"/>
+
+                <!-- 5. Persist Ticket to Salesforce Support_Ticket__c (PDF Requirement 10) -->
+                <ee:transform doc:name="Build ticket record">
+                    <ee:message><ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+vars.ticketRequest ++ {
+  requestId: vars.requestId,
+  correlationId: vars.correlationId,
+  customerTier: vars.customerTier,
+  priority: vars.routing.priority,
+  team: vars.routing.team,
+  targetQueue: vars.routing.targetQueue,
+  matchedRuleId: vars.routing.matchedRuleId,
+  priorityReason: vars.routing.priorityReason,
+  isDefaultRoute: vars.routing.isDefaultRoute,
+  ackDueAt: vars.routing.ackDueAt,
+  resolutionDueAt: vars.routing.resolutionDueAt
+}]]></ee:set-payload></ee:message>
+                </ee:transform>
+                <flow-ref name="${impl.saveTicket}" doc:name="Save ticket"/>
+                <set-variable variableName="savedTicket" value="#[payload]" doc:name="Keep saved ticket"/>
+
+                <!-- 6. Publish to ActiveMQ Priority Queue (PDF Requirement 3 & 9) -->
+                <flow-ref name="publish-ticket-to-queue" doc:name="Publish to JMS queue"/>
+
+                <!-- 7. Customer Acknowledgement Email (PDF Requirement 12) -->
+                <flow-ref name="send-customer-acknowledgement" doc:name="Send Ack Email"/>
+
+                <!-- 8. Team Notification Email (PDF Requirement 13) -->
+                <flow-ref name="send-team-notification" doc:name="Send Team Notification"/>
+
+                <!-- 9. Return HTTP 201 Created Response (PDF Page 6) -->
+                <ee:transform doc:name="201 response">
+                    <ee:message><ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var t = vars.savedTicket default payload
+---
+{
+  ticketId: t.ticketId,
+  status: t.status,
+  priority: t.priority,
+  priorityReason: t.priorityReason,
+  matchedRuleId: t.matchedRuleId,
+  team: t.team,
+  targetQueue: t.targetQueue,
+  createdAt: t.createdAt,
+  ackDueAt: t.ackDueAt,
+  resolutionDueAt: t.resolutionDueAt,
+  statusUrl: "/api/v1/tickets/" ++ t.ticketId
+}]]></ee:set-payload></ee:message>
+                    <ee:variables>
+                        <ee:set-variable variableName="httpStatus">201</ee:set-variable>
+                        <ee:set-variable variableName="outboundHeaders"><![CDATA[%dw 2.0
+output application/java
+---
+{ "Location": "/api/v1/tickets/" ++ vars.savedTicket.ticketId }]]></ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+            </otherwise>
+        </choice> 
+    </flow>
+
+    <!-- Subflow: Publish to ActiveMQ Priority Queue with Fallback -->
+    <sub-flow name="publish-ticket-to-queue">
+        <try doc:name="Try Publish to JMS">
+            <jms:publish doc:name="Publish to priority queue"
+                         config-ref="ActiveMQ_Config"
+                         destination="#[vars.routing.targetQueue default 'support.std.queue']"
+                         priority="#[if (vars.routing.priority == 'P1') 9 else if (vars.routing.priority == 'P4') 2 else 5]">
+                <jms:message>
+                    <jms:body><![CDATA[#[%dw 2.0
+output application/json
+---
+{
+  eventType: "TICKET_ROUTED",
+  eventId: "evt-" ++ uuid(),
+  correlationId: vars.correlationId,
+  routedAt: now() as String,
+  ticketId: vars.savedTicket.ticketId,
+  priority: vars.savedTicket.priority,
+  team: vars.savedTicket.team,
+  matchedRuleId: vars.savedTicket.matchedRuleId,
+  customerId: vars.ticketRequest.customerId,
+  customerTier: vars.customerTier,
+  contactEmail: vars.ticketRequest.contactEmail,
+  productCode: vars.ticketRequest.productCode,
+  categoryCode: vars.ticketRequest.categoryCode,
+  subject: vars.ticketRequest.subject,
+  ackDueAt: vars.savedTicket.ackDueAt,
+  resolutionDueAt: vars.savedTicket.resolutionDueAt,
+  attempt: 1
+}]]]></jms:body>
+                    <jms:properties><![CDATA[#[{
+                        "JMSType": "TicketRouted",
+                        "correlationId": vars.correlationId,
+                        "ticketId": vars.savedTicket.ticketId,
+                        "priority": vars.savedTicket.priority
+                    }]]]></jms:properties>
+                </jms:message>
+            </jms:publish>
+            <error-handler>
+                <on-error-continue enableNotifications="false" logException="true" doc:name="Broker Unavailable Fallback">
+                    <logger level="WARN" message="#['[ActiveMQ Offline] Broker not reachable for ' ++ (vars.savedTicket.ticketId default '') ++ '. Ticket persists in Salesforce.']" doc:name="Log broker fallback"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </sub-flow>
+
+    <!-- Subflow: Customer Acknowledgement Email with Fallback -->
+    <sub-flow name="send-customer-acknowledgement">
+        <try doc:name="Try Send Email">
+            <ee:transform doc:name="Build Email Content">
+                <ee:variables>
+                    <ee:set-variable variableName="emailSubject"><![CDATA[%dw 2.0
+output application/java
+var t = vars.savedTicket default {}
+---
+"[" ++ (t.ticketId default "TICKET") ++ "] " ++ (t.priority default "P3") ++ " – we have your request"]]></ee:set-variable>
+                    <ee:set-variable variableName="emailBody"><![CDATA[%dw 2.0
+output text/plain
+var t = vars.savedTicket default {}
+var req = vars.ticketRequest default {}
+---
+"Dear Valued Customer,\n\n" ++
+"We have logged your support request and assigned it to our " ++ (t.team default "Support") ++ " team.\n\n" ++
+" Ticket Reference : " ++ (t.ticketId default "") ++ "\n" ++
+" Logged At        : " ++ ((t.createdAt as String) default "") ++ "\n" ++
+" Priority         : " ++ (t.priority default "") ++ "\n" ++
+" Product          : " ++ (req.productCode default "") ++ "\n" ++
+" Category         : " ++ (req.categoryCode default "") ++ "\n\n" ++
+"What you told us\n " ++ (req.subject default "") ++ "\n\n" ++
+"We will respond by " ++ ((t.ackDueAt as String) default "N/A") ++ ". Our current target for a resolution is " ++ ((t.resolutionDueAt as String) default "N/A") ++ ".\n\n" ++
+"To add information, reply to this email leaving the subject line unchanged so that it reaches the same ticket. You can also check progress at /api/v1/tickets/" ++ (t.ticketId default "") ++ ".\n\n" ++
+(if ((t.priority default "") == "P1") "This request is being handled as a priority one incident. Our on-call engineer has been paged.\n\n" else "") ++
+"Regards,\nNPN Customer Support\n"]]></ee:set-variable>
+                </ee:variables>
+            </ee:transform>
+            <email:send doc:name="Send Customer Acknowledgement"
+                        config-ref="Email_SMTP"
+                        fromAddress="${smtp.from}"
+                        subject="#[vars.emailSubject]">
+                <email:to-addresses>
+                    <email:to-address value="#[vars.ticketRequest.contactEmail default 'customer@example.com']"/>
+                </email:to-addresses>
+                <email:body contentType="text/plain">
+                    <email:content>#[vars.emailBody]</email:content>
+                </email:body>
+            </email:send>
+            <logger level="INFO" message="#['[Email Sent] Acknowledgement sent to ' ++ (vars.ticketRequest.contactEmail default '')]" doc:name="Log email sent"/>
+            <error-handler>
+                <on-error-continue enableNotifications="false" logException="true" doc:name="SMTP Unavailable Fallback">
+                    <logger level="WARN" message="#['[SMTP Offline] Acknowledgement email could not be delivered for ' ++ (vars.savedTicket.ticketId default '') ++ '. Ticket remains in Salesforce.']" doc:name="Log SMTP fallback"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </sub-flow>
+
+    <!-- Subflow: Team Notification Email with Fallback (PDF Requirement 13) -->
+    <sub-flow name="send-team-notification">
+        <try doc:name="Try Send Team Email">
+            <ee:transform doc:name="Build Team Email Content">
+                <ee:variables>
+                    <ee:set-variable variableName="teamEmailSubject"><![CDATA[%dw 2.0
+output application/java
+var t = vars.savedTicket default {}
+var req = vars.ticketRequest default {}
+---
+(t.priority default "P3") ++ " " ++ (t.ticketId default "") ++ " – " ++ (req.categoryCode default "")]]></ee:set-variable>
+                    <ee:set-variable variableName="teamEmailBody"><![CDATA[%dw 2.0
+output text/plain
+var t = vars.savedTicket default {}
+var req = vars.ticketRequest default {}
+---
+"Ticket   : " ++ (t.ticketId default "") ++ "\n" ++
+"Priority : " ++ (t.priority default "") ++ " (rule " ++ (t.matchedRuleId default "DEFAULT") ++ ")\n" ++
+"Customer : Valued Customer (" ++ (req.customerId default "") ++ ") – " ++ (vars.customerTier default "STANDARD") ++ "\n" ++
+"Product  : " ++ (req.productCode default "") ++ "\n" ++
+"Category : " ++ (req.categoryCode default "") ++ "\n" ++
+"Impact   : " ++ ((req.affectedUserCount default 0) as String) ++ " users reported affected\n\n" ++
+"Subject\n " ++ (req.subject default "") ++ "\n\n" ++
+"Acknowledge by : " ++ ((t.ackDueAt as String) default "N/A") ++ "\n" ++
+"Resolve by     : " ++ ((t.resolutionDueAt as String) default "N/A") ++ "\n" ++
+"Assigned to    : " ++ (t.assignedTo default "UNASSIGNED") ++ "\n\n" ++
+"Open in console : /api/v1/tickets/" ++ (t.ticketId default "") ++ "\n\n" ++
+(if (t.isDefaultRoute == "Y" or t.isDefaultRoute == true)
+    "NOTE: no routing rule matched this ticket. It has been sent to the triage queue and the rule set needs review.\n" ++
+    " category " ++ (req.categoryCode default "") ++ " / product " ++ (req.productCode default "") ++ "\n" ++
+    " tier " ++ (vars.customerTier default "UNKNOWN") ++ " / severity " ++ (req.statedSeverity default "UNKNOWN") ++ "\n\n"
+ else "")]]></ee:set-variable>
+                </ee:variables>
+            </ee:transform>
+            <email:send doc:name="Send Team Notification"
+                        config-ref="Email_SMTP"
+                        fromAddress="${smtp.integrationFrom}"
+                        subject="#[vars.teamEmailSubject]">
+                <email:to-addresses>
+                    <email:to-address value="${report.mgmtEmail}"/>
+                </email:to-addresses>
+                <email:body contentType="text/plain">
+                    <email:content>#[vars.teamEmailBody]</email:content>
+                </email:body>
+            </email:send>
+            <logger level="INFO" message="#['[Email Sent] Team notification sent to ' ++ p('report.mgmtEmail')]" doc:name="Log team email sent"/>
+            <error-handler>
+                <on-error-continue enableNotifications="false" logException="true" doc:name="SMTP Unavailable Fallback">
+                    <logger level="WARN" message="#['[SMTP Offline] Team notification could not be delivered for ' ++ (vars.savedTicket.ticketId default '') ++ '. Ticket remains in Salesforce.']" doc:name="Log SMTP fallback"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </sub-flow>
+
+    <!-- GET /tickets/{ticketId}: Status Query (PDF Requirement 14) -->
+    <flow name="get:\tickets\(ticketId):npn-support-ticket-api-config">
+        <set-variable variableName="ticketId" value="#[attributes.uriParams.ticketId]" doc:name="Set ticketId"/>
+        <set-variable variableName="correlationId" value="#[attributes.headers.'x-request-id' default correlationId]" doc:name="Set correlationId"/>
+        <logger level="INFO" message="#['[' ++ vars.correlationId ++ '] Status query for ' ++ vars.ticketId]" doc:name="Log request"/>
+
+        <flow-ref name="${impl.getTicket}" doc:name="Get ticket"/>
+
+        <choice doc:name="Ticket found?">
+            <when expression="#[payload == null]">
+                <raise-error type="CUSTOM:TICKET_NOT_FOUND" description="#['ticketId ' ++ vars.ticketId ++ ' was not found.']" doc:name="Ticket not found"/>
+            </when>
+            <otherwise>
+                <flow-ref name="build-status-response" doc:name="Build response"/>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- PATCH /tickets/{ticketId}: State Machine Status Transition (PDF Requirement 14 & 18) -->
+    <flow name="patch:\tickets\(ticketId):application\json:npn-support-ticket-api-config">
+        <set-variable variableName="ticketId" value="#[attributes.uriParams.ticketId]" doc:name="Set ticketId"/>
+        <set-variable variableName="newStatus" value="#[payload.status as String]" doc:name="Set newStatus"/>
+        <set-variable variableName="correlationId" value="#[attributes.headers.'x-request-id' default correlationId]" doc:name="Set correlationId"/>
+        <logger level="INFO" message="#[output application/java --- '[' ++ vars.correlationId ++ '] Status update for ' ++ vars.ticketId ++ ' to ' ++ vars.newStatus]" doc:name="Log request"/>
+
+        <flow-ref name="${impl.getTicket}" doc:name="Get ticket"/>
+
+        <choice doc:name="Ticket found?">
+            <when expression="#[payload == null]">
+                <raise-error type="CUSTOM:TICKET_NOT_FOUND" description="#['ticketId ' ++ vars.ticketId ++ ' was not found.']" doc:name="Ticket not found"/>
+            </when>
+            <otherwise>
+                <set-variable variableName="currentStatus" value="#[payload.status as String]" doc:name="Set currentStatus"/>
+                <set-variable variableName="ticketSfId" value="#[payload.sfId]" doc:name="Set ticketSfId"/>
+                <ee:transform doc:name="Check transition">
+                    <ee:message/>
+                    <ee:variables>
+                        <ee:set-variable variableName="transitionAllowed"><![CDATA[%dw 2.0
+import isAllowed from dwl::StateMachine
+output application/java
+---
+isAllowed(vars.currentStatus, vars.newStatus)]]></ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+                <choice doc:name="Transition allowed?">
+                    <when expression="#[vars.transitionAllowed]">
+                        <flow-ref name="${impl.updateStatus}" doc:name="Update status"/>
+                        <flow-ref name="build-status-response" doc:name="Build response"/>
+                    </when>
+                    <otherwise>
+                        <raise-error type="CUSTOM:INVALID_TRANSITION" description="#[output text/plain --- 'Invalid transition from ' ++ (vars.currentStatus as String) ++ ' to ' ++ (vars.newStatus as String)]" doc:name="Invalid transition"/>
+                    </otherwise>
+                </choice>
+            </otherwise>
+        </choice>
+    </flow>
+
+    <!-- Subflow: Build Status Response -->
+    <sub-flow name="build-status-response">
+        <ee:transform doc:name="Status response">
+            <ee:message><ee:set-payload><![CDATA[%dw 2.0
+output application/json skipNullOn="everywhere"
+var ackDue = if (payload.ackDueAt != null) payload.ackDueAt as DateTime else null
+var acked = if (payload.acknowledgedAt != null) payload.acknowledgedAt as DateTime else null
+---
+{
+  ticketId: payload.ticketId,
+  status: payload.status,
+  priority: payload.priority,
+  team: payload.team,
+  assignedTo: payload.assignedTo,
+  assignedAt: payload.assignedAt,
+  acknowledgedAt: payload.acknowledgedAt,
+  ackDueAt: payload.ackDueAt,
+  ackBreached: if (ackDue == null) false else if (acked != null) (acked > ackDue) else (now() > ackDue)
+}]]></ee:set-payload></ee:message>
+        </ee:transform>
+    </sub-flow>
+
+    <!-- Subflow: Validate Customer Existence and Tier -->
+    <sub-flow name="validate-customer">
+        <ee:transform doc:name="Lookup customer">
+            <ee:message><ee:set-payload><![CDATA[%dw 2.0
+output application/java
+var customers = { "CUST-77219": "ENTERPRISE", "CUST-81140": "STANDARD", "CUST-66207": "STANDARD", "CUST-001": "STANDARD" }
+---
+if (customers[vars.customerId] != null) { customerId: vars.customerId, tier: customers[vars.customerId] } else null]]></ee:set-payload></ee:message>
+        </ee:transform>
+    </sub-flow>
+
+    <!-- Subflow: Validate Product Catalog Existence -->
+    <sub-flow name="validate-product">
+        <ee:transform doc:name="Lookup product">
+            <ee:message><ee:set-payload><![CDATA[%dw 2.0
+output application/java
+var products = ["PAY-GATEWAY", "MOBILE-APP", "DATA-SYNC", "PAY-GATEWAY-V1"]
+---
+if (products contains vars.productCode) { productCode: vars.productCode } else null]]></ee:set-payload></ee:message>
+        </ee:transform>
+    </sub-flow>
+
+</mule>

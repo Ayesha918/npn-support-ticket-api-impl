@@ -1,0 +1,989 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+      xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:apikit="http://www.mulesoft.org/schema/mule/mule-apikit"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+        http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+        http://www.mulesoft.org/schema/mule/mule-apikit http://www.mulesoft.org/schema/mule/mule-apikit/current/mule-apikit.xsd">
+
+    <munit:config name="munit-config" />
+
+    <!-- Helper Subflows for Error Injection in MUnit -->
+    <flow name="helper-raise-connectivity-flow">
+        <raise-error type="MULE:CONNECTIVITY" description="Simulated connectivity failure"/>
+    </flow>
+
+    <flow name="helper-raise-backend-unavailable-flow">
+        <raise-error type="MULE:CONNECTIVITY" description="Backend is unavailable (simulated)."/>
+    </flow>
+
+    <flow name="helper-raise-internal-error-flow">
+        <raise-error type="CUSTOM:UNEXPECTED" description="Simulated internal error"/>
+    </flow>
+
+    <flow name="helper-patch-query-flow">
+        <ee:transform doc:name="Dynamic patch query response">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+[{
+    Id: 'sf-patch-001',
+    Name: 'TKT-2026-0000001',
+    Request_ID__c: 'munit-req-001',
+    Ticket_Status__c: if (vars.currentStatus != null) vars.newStatus else 'NEW',
+    Priority__c: 'P2',
+    Assigned_Team__c: 'PAYMENTS_L1',
+    Customer_Tier__c: 'STANDARD',
+    CreatedDate: now()
+}]]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- ========================================================================= -->
+    <!-- 1. POST /tickets: Ticket Creation Suite                                   -->
+    <!-- ========================================================================= -->
+
+    <!-- Test 1: Ticket Creation Success -->
+    <munit:test name="test-create-ticket-success" description="Verify successful ticket creation returns 201 with ticket metadata">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock find-ticket">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="Query by request id" attributeName="doc:name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock routing rules">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="Routing rules query" attributeName="doc:name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{
+                        Name: 'RR-014',
+                        Category_Code__c: 'PAYMENT_FAILURE',
+                        Product_Code__c: 'PAY-GATEWAY-V1',
+                        Customer_Tier__c: 'STANDARD',
+                        Stated_Severity__c: 'HIGH',
+                        Assigned_Priority__c: 'P2',
+                        Assigned_Team__c: 'PAYMENTS_L1',
+                        Queue_Name__c: 'support.std.queue',
+                        Ack_SLA_Minutes__c: 60,
+                        Resolution_SLA_Hours__c: 24,
+                        Is_Active__c: true,
+                        Rule_Priority__c: 1
+                    }]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock holidays">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="Holiday query" attributeName="doc:name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+
+            <munit-tools:mock-when processor=".*:create" doc:name="Mock save ticket in SF">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="Create ticket" attributeName="doc:name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{ id: 'sf-created-001' }]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock read back by Id">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="Read back by Id" attributeName="doc:name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{
+                        Id: 'sf-created-001',
+                        Name: 'TKT-2026-0000001',
+                        Request_ID__c: 'munit-req-001',
+                        Ticket_Status__c: 'NEW',
+                        Priority__c: 'P2',
+                        Assigned_Team__c: 'PAYMENTS_L1',
+                        Customer_Tier__c: 'STANDARD',
+                        CreatedDate: now()
+                    }]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+
+            <munit-tools:mock-when processor=".*:publish" doc:name="Mock JMS publish">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+
+            <munit-tools:mock-when processor=".*:send" doc:name="Mock send customer ack">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="Send Customer Acknowledgement" attributeName="doc:name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+
+            <munit-tools:mock-when processor=".*:send" doc:name="Mock send team notification">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="Send Team Notification" attributeName="doc:name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <munit:set-event doc:name="Set Event with Ticket Request">
+                <munit:payload value='#[output application/json --- {
+                    "customerId": "CUST-001",
+                    "productCode": "PAY-GATEWAY-V1",
+                    "categoryCode": "PAYMENT_FAILURE",
+                    "statedSeverity": "HIGH",
+                    "contactChannel": "EMAIL",
+                    "contactEmail": "npnsupport@gmail.com",
+                    "subject": "Payment Timeout",
+                    "description": "Payment gateway connection timed out during checkout"
+                }]' mediaType="application/json"/>
+                <munit:attributes value="#[{
+                    headers: {
+                        'x-request-id': 'munit-req-001',
+                        'content-type': 'application/json'
+                    }
+                }]"/>
+            </munit:set-event>
+            <flow-ref name="post:\tickets:application\json:npn-support-ticket-api-config" doc:name="Call Create Ticket Flow"/>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus as Number default 200]" is="#[MunitTools::equalTo(201)]" message="HTTP Status should be 201"/>
+            <munit-tools:assert-that expression="#[payload.status]" is="#[MunitTools::equalTo('NEW')]" message="Status should be NEW"/>
+            <munit-tools:assert-that expression="#[payload.ticketId]" is="#[MunitTools::equalTo('TKT-2026-0000001')]" message="TicketId must match"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- Test 2: Ticket Creation - Duplicate Request Id (Idempotency) -->
+    <munit:test name="test-create-ticket-duplicate" description="Verify duplicate request returns existing ticket with 200">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock find-ticket returns existing">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="Query by request id" attributeName="doc:name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{
+                        Id: 'sf-existing-001',
+                        Name: 'TKT-2026-0000001',
+                        Request_ID__c: 'munit-req-dup',
+                        Ticket_Status__c: 'NEW',
+                        Priority__c: 'P2',
+                        Assigned_Team__c: 'PAYMENTS_L1',
+                        Customer_Tier__c: 'STANDARD',
+                        CreatedDate: now()
+                    }]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <munit:set-event doc:name="Set Event with Existing Request">
+                <munit:payload value='#[output application/json --- {
+                    "customerId": "CUST-001",
+                    "productCode": "PAY-GATEWAY-V1",
+                    "categoryCode": "PAYMENT_FAILURE",
+                    "statedSeverity": "HIGH",
+                    "contactChannel": "EMAIL",
+                    "contactEmail": "npnsupport@gmail.com",
+                    "subject": "Payment Timeout",
+                    "description": "Payment gateway connection timed out during checkout"
+                }]' mediaType="application/json"/>
+                <munit:attributes value="#[{
+                    headers: {
+                        'x-request-id': 'munit-req-dup',
+                        'content-type': 'application/json'
+                    }
+                }]"/>
+            </munit:set-event>
+            <flow-ref name="post:\tickets:application\json:npn-support-ticket-api-config" doc:name="Call Create Ticket Flow"/>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus as Number default 200]" is="#[MunitTools::equalTo(200)]" message="HTTP Status should be 200"/>
+            <munit-tools:assert-that expression="#[payload.duplicateOfRequestId]" is="#[MunitTools::equalTo(true)]" message="Must indicate duplicate"/>
+            <munit-tools:assert-that expression="#[payload.ticketId]" is="#[MunitTools::equalTo('TKT-2026-0000001')]" message="Must return ticketId"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- Test 3: Ticket Creation - Validation Failure (Missing Subject) -->
+    <munit:test name="test-create-ticket-validation-failure" description="Verify blank subject returns 400 validation error">
+        <munit:execution>
+            <munit:set-event doc:name="Set Event with Invalid Request">
+                <munit:payload value='#[output application/json --- {
+                    "customerId": "CUST-001",
+                    "productCode": "PAY-GATEWAY-V1",
+                    "categoryCode": "PAYMENT_FAILURE",
+                    "statedSeverity": "HIGH",
+                    "contactChannel": "EMAIL",
+                    "contactEmail": "npnsupport@gmail.com",
+                    "subject": "",
+                    "description": ""
+                }]' mediaType="application/json"/>
+                <munit:attributes value="#[{
+                    headers: {
+                        'x-request-id': 'munit-req-invalid',
+                        'content-type': 'application/json'
+                    }
+                }]"/>
+            </munit:set-event>
+            <try>
+                <flow-ref name="post:\tickets:application\json:npn-support-ticket-api-config" doc:name="Call Create Ticket Flow"/>
+                <error-handler>
+                    <on-error-continue/>
+                </error-handler>
+            </try>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus as Number default 200]" is="#[MunitTools::equalTo(400)]" message="HTTP Status should be 400"/>
+            <munit-tools:assert-that expression="#[payload.errorCode]" is="#[MunitTools::equalTo('VALIDATION_ERROR')]" message="ErrorCode should be VALIDATION_ERROR"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- Test 4: Ticket Creation - Unknown Customer -->
+    <munit:test name="test-create-ticket-unknown-customer" description="Verify unknown customer returns 422">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock find-ticket returns empty">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <munit:set-event doc:name="Set Event with Unknown Customer">
+                <munit:payload value='#[output application/json --- {
+                    "customerId": "CUST-UNKNOWN-999",
+                    "productCode": "PAY-GATEWAY-V1",
+                    "categoryCode": "PAYMENT_FAILURE",
+                    "statedSeverity": "HIGH",
+                    "contactChannel": "EMAIL",
+                    "contactEmail": "npnsupport@gmail.com",
+                    "subject": "Payment Timeout",
+                    "description": "Payment gateway connection timed out during checkout"
+                }]' mediaType="application/json"/>
+                <munit:attributes value="#[{
+                    headers: {
+                        'x-request-id': 'munit-req-unknown-cust',
+                        'content-type': 'application/json'
+                    }
+                }]"/>
+            </munit:set-event>
+            <try>
+                <flow-ref name="post:\tickets:application\json:npn-support-ticket-api-config" doc:name="Call Create Ticket Flow"/>
+                <error-handler>
+                    <on-error-continue/>
+                </error-handler>
+            </try>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus as Number default 200]" is="#[MunitTools::equalTo(422)]" message="HTTP Status should be 422"/>
+            <munit-tools:assert-that expression="#[payload.errorCode]" is="#[MunitTools::equalTo('UNKNOWN_CUSTOMER')]" message="ErrorCode should be UNKNOWN_CUSTOMER"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- Test 5: Ticket Creation - Unknown Product -->
+    <munit:test name="test-create-ticket-unknown-product" description="Verify unknown product returns 422">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock find-ticket returns empty">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <munit:set-event doc:name="Set Event with Unknown Product">
+                <munit:payload value='#[output application/json --- {
+                    "customerId": "CUST-001",
+                    "productCode": "PRODUCT-UNKNOWN-999",
+                    "categoryCode": "PAYMENT_FAILURE",
+                    "statedSeverity": "HIGH",
+                    "contactChannel": "EMAIL",
+                    "contactEmail": "npnsupport@gmail.com",
+                    "subject": "Payment Timeout",
+                    "description": "Payment gateway connection timed out during checkout"
+                }]' mediaType="application/json"/>
+                <munit:attributes value="#[{
+                    headers: {
+                        'x-request-id': 'munit-req-unknown-prod',
+                        'content-type': 'application/json'
+                    }
+                }]"/>
+            </munit:set-event>
+            <try>
+                <flow-ref name="post:\tickets:application\json:npn-support-ticket-api-config" doc:name="Call Create Ticket Flow"/>
+                <error-handler>
+                    <on-error-continue/>
+                </error-handler>
+            </try>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus as Number default 200]" is="#[MunitTools::equalTo(422)]" message="HTTP Status should be 422"/>
+            <munit-tools:assert-that expression="#[payload.errorCode]" is="#[MunitTools::equalTo('UNKNOWN_PRODUCT')]" message="ErrorCode should be UNKNOWN_PRODUCT"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- ========================================================================= -->
+    <!-- 2. GET /tickets/{ticketId}: Status Query Suite                            -->
+    <!-- ========================================================================= -->
+
+    <!-- Test 6: Get Ticket by ID Success -->
+    <munit:test name="test-get-ticket-by-id-success" description="Verify retrieving an existing ticket returns 200 OK">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock query ticket">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="Query by ticketId" attributeName="doc:name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{
+                        Id: 'sf-get-001',
+                        Name: 'TKT-2026-0000001',
+                        Request_ID__c: 'munit-req-001',
+                        Ticket_Status__c: 'ASSIGNED',
+                        Priority__c: 'P2',
+                        Assigned_Team__c: 'PAYMENTS_L1',
+                        Customer_Tier__c: 'STANDARD',
+                        Acknowledgement_Due_At__c: (now() + |PT1H|),
+                        CreatedDate: now()
+                    }]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <munit:set-event doc:name="Set Event with uriParams">
+                <munit:attributes value="#[{
+                    uriParams: {
+                        ticketId: 'TKT-2026-0000001'
+                    },
+                    headers: {
+                        'x-request-id': 'munit-get-001'
+                    }
+                }]"/>
+            </munit:set-event>
+            <flow-ref name="get:\tickets\(ticketId):npn-support-ticket-api-config" doc:name="Call Get Ticket Flow"/>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.ticketId]" is="#[MunitTools::equalTo('TKT-2026-0000001')]" message="TicketId must match"/>
+            <munit-tools:assert-that expression="#[payload.status]" is="#[MunitTools::equalTo('ASSIGNED')]" message="Status should be ASSIGNED"/>
+            <munit-tools:assert-that expression="#[payload.team]" is="#[MunitTools::equalTo('PAYMENTS_L1')]" message="Team should be PAYMENTS_L1"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- Test 7: Get Ticket Not Found -->
+    <munit:test name="test-get-ticket-not-found" description="Verify retrieving non-existent ticket returns 404">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock query ticket returns empty">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <munit:set-event doc:name="Set Event with Unknown Ticket">
+                <munit:attributes value="#[{
+                    uriParams: {
+                        ticketId: 'TKT-NOTFOUND-999'
+                    },
+                    headers: {
+                        'x-request-id': 'munit-get-404'
+                    }
+                }]"/>
+            </munit:set-event>
+            <try>
+                <flow-ref name="get:\tickets\(ticketId):npn-support-ticket-api-config" doc:name="Call Get Ticket Flow"/>
+                <error-handler>
+                    <on-error-continue/>
+                </error-handler>
+            </try>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus as Number default 200]" is="#[MunitTools::equalTo(404)]" message="HTTP Status should be 404"/>
+            <munit-tools:assert-that expression="#[payload.errorCode]" is="#[MunitTools::equalTo('TICKET_NOT_FOUND')]" message="ErrorCode should be TICKET_NOT_FOUND"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- ========================================================================= -->
+    <!-- 3. PATCH /tickets/{ticketId}: Status Transition Suite                     -->
+    <!-- ========================================================================= -->
+
+    <!-- Test 8: Patch Ticket Success -->
+    <munit:test name="test-patch-ticket-success" description="Verify valid status transition returns 200 with new status">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock query ticket for patch">
+                <munit-tools:then-call flow="helper-patch-query-flow"/>
+            </munit-tools:mock-when>
+
+            <munit-tools:mock-when processor=".*:update" doc:name="Mock update ticket status">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{ success: true }]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <munit:set-event doc:name="Set Event with Patch Request">
+                <munit:payload value='#[output application/json --- {
+                    "status": "ASSIGNED"
+                }]' mediaType="application/json"/>
+                <munit:attributes value="#[{
+                    uriParams: {
+                        ticketId: 'TKT-2026-0000001'
+                    },
+                    headers: {
+                        'x-request-id': 'munit-patch-001'
+                    }
+                }]"/>
+            </munit:set-event>
+            <flow-ref name="patch:\tickets\(ticketId):application\json:npn-support-ticket-api-config" doc:name="Call Patch Ticket Flow"/>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.status]" is="#[MunitTools::equalTo('ASSIGNED')]" message="Status should be updated to ASSIGNED"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- Test 9: Patch Ticket Not Found -->
+    <munit:test name="test-patch-ticket-not-found" description="Verify patching non-existent ticket returns 404">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock query ticket returns empty">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <munit:set-event doc:name="Set Event with Unknown Patch Ticket">
+                <munit:payload value='#[output application/json --- { "status": "ASSIGNED" }]' mediaType="application/json"/>
+                <munit:attributes value="#[{
+                    uriParams: { ticketId: 'TKT-NOTFOUND-999' },
+                    headers: { 'x-request-id': 'munit-patch-404' }
+                }]"/>
+            </munit:set-event>
+            <try>
+                <flow-ref name="patch:\tickets\(ticketId):application\json:npn-support-ticket-api-config" doc:name="Call Patch Ticket Flow"/>
+                <error-handler>
+                    <on-error-continue/>
+                </error-handler>
+            </try>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus as Number default 200]" is="#[MunitTools::equalTo(404)]" message="HTTP Status should be 404"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- Test 10: Patch Ticket Invalid Transition -->
+    <munit:test name="test-patch-ticket-invalid-transition" description="Verify invalid state transition returns 409">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock query ticket in NEW status">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{
+                        Id: 'sf-patch-001',
+                        Name: 'TKT-2026-0000001',
+                        Ticket_Status__c: 'NEW',
+                        CreatedDate: now()
+                    }]]" mediaType="application/java"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <munit:set-event doc:name="Set Event with Illegal Transition to CLOSED">
+                <munit:payload value='#[output application/json --- { "status": "CLOSED" }]' mediaType="application/json"/>
+                <munit:attributes value="#[{
+                    uriParams: { ticketId: 'TKT-2026-0000001' },
+                    headers: { 'x-request-id': 'munit-patch-409' }
+                }]"/>
+            </munit:set-event>
+            <try>
+                <flow-ref name="patch:\tickets\(ticketId):application\json:npn-support-ticket-api-config" doc:name="Call Patch Ticket Flow"/>
+                <error-handler>
+                    <on-error-continue/>
+                </error-handler>
+            </try>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus as Number default 200]" is="#[MunitTools::equalTo(409)]" message="HTTP Status should be 409"/>
+            <munit-tools:assert-that expression="#[payload.errorCode]" is="#[MunitTools::equalTo('INVALID_STATUS_TRANSITION')]" message="ErrorCode must match"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- ========================================================================= -->
+    <!-- 4. Resilient Publishing & Notification Fallbacks                          -->
+    <!-- ========================================================================= -->
+
+    <!-- Test 11: JMS Publish Fallback -->
+    <munit:test name="test-publish-queue-fallback" description="Verify ActiveMQ offline fallback executes gracefully">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:publish" doc:name="Mock JMS connectivity error">
+                <munit-tools:then-call flow="helper-raise-connectivity-flow"/>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <set-variable variableName="routing" value="#[{ targetQueue: 'support.p1.queue', priority: 'P1' }]"/>
+            <set-variable variableName="savedTicket" value="#[{ ticketId: 'TKT-001', priority: 'P1', team: 'L1', matchedRuleId: 'R1' }]"/>
+            <set-variable variableName="ticketRequest" value="#[{ customerId: 'C1', contactEmail: 'a@b.com' }]"/>
+            <set-variable variableName="correlationId" value="test-corr-jms"/>
+            <flow-ref name="publish-ticket-to-queue" doc:name="Call publish-ticket-to-queue"/>
+        </munit:execution>
+    </munit:test>
+
+    <!-- Test 12: Customer Ack Email Fallback -->
+    <munit:test name="test-send-customer-ack-fallback" description="Verify Customer Email SMTP offline fallback executes gracefully">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:send" doc:name="Mock SMTP connectivity error">
+                <munit-tools:then-call flow="helper-raise-connectivity-flow"/>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <set-variable variableName="savedTicket" value="#[{ ticketId: 'TKT-001', priority: 'P1', team: 'L1' }]"/>
+            <set-variable variableName="ticketRequest" value="#[{ contactEmail: 'test@example.com', productCode: 'P1', categoryCode: 'C1', subject: 'Help' }]"/>
+            <flow-ref name="send-customer-acknowledgement" doc:name="Call send-customer-acknowledgement"/>
+        </munit:execution>
+    </munit:test>
+
+    <!-- Test 13: Team Notification Email Fallback -->
+    <munit:test name="test-send-team-notification-fallback" description="Verify Team Email SMTP offline fallback executes gracefully">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:send" doc:name="Mock SMTP connectivity error">
+                <munit-tools:then-call flow="helper-raise-connectivity-flow"/>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <set-variable variableName="savedTicket" value="#[{ ticketId: 'TKT-001', priority: 'P1', team: 'L1', matchedRuleId: 'R1', isDefaultRoute: true }]"/>
+            <set-variable variableName="ticketRequest" value="#[{ customerId: 'C1', productCode: 'P1', categoryCode: 'C1', subject: 'Urgent' }]"/>
+            <set-variable variableName="customerTier" value="ENTERPRISE"/>
+            <flow-ref name="send-team-notification" doc:name="Call send-team-notification"/>
+        </munit:execution>
+    </munit:test>
+
+    <!-- ========================================================================= -->
+    <!-- 5. Intelligent Routing & SLA Calculation Suite (`routing.xml`)            -->
+    <!-- ========================================================================= -->
+
+    <!-- Test 14: Route Ticket P1 SLA Calculation -->
+    <munit:test name="test-route-ticket-p1-priority" description="Verify P1 priority routing calculates 24/7 calendar SLA">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock routing rules for P1">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="Routing rules query" attributeName="doc:name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{
+                        Name: 'RR-P1-001',
+                        Category_Code__c: 'PAYMENT_FAILURE',
+                        Product_Code__c: 'PAY-GATEWAY-V1',
+                        Customer_Tier__c: 'STANDARD',
+                        Stated_Severity__c: 'HIGH',
+                        Assigned_Priority__c: 'P1',
+                        Assigned_Team__c: 'CRITICAL_RESPONSE',
+                        Queue_Name__c: 'support.p1.queue',
+                        Ack_SLA_Minutes__c: 15,
+                        Resolution_SLA_Hours__c: 4,
+                        Is_Active__c: true,
+                        Rule_Priority__c: 1
+                    }]]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock holiday query">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="Holiday query" attributeName="doc:name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{ Holiday_Date__c: |2026-12-25| }]]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <munit:set-event doc:name="Set Routing Input">
+                <munit:payload value="#[{
+                    categoryCode: 'PAYMENT_FAILURE',
+                    productCode: 'PAY-GATEWAY-V1',
+                    customerTier: 'STANDARD',
+                    statedSeverity: 'HIGH'
+                }]"/>
+            </munit:set-event>
+            <flow-ref name="route-ticket-sf" doc:name="Call route-ticket-sf"/>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.priority]" is="#[MunitTools::equalTo('P1')]" message="Priority must be P1"/>
+            <munit-tools:assert-that expression="#[payload.team]" is="#[MunitTools::equalTo('CRITICAL_RESPONSE')]" message="Team must match"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- Test 15: Route Ticket Default Fallback (RR-099) -->
+    <munit:test name="test-route-ticket-default-route" description="Verify unmatched ticket falls back to RR-099 default rule">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock routing rules with only default rule">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="Routing rules query" attributeName="doc:name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{
+                        Name: 'RR-099',
+                        Category_Code__c: 'DEFAULT',
+                        Product_Code__c: 'DEFAULT',
+                        Customer_Tier__c: 'DEFAULT',
+                        Stated_Severity__c: 'DEFAULT',
+                        Assigned_Priority__c: 'P3',
+                        Assigned_Team__c: 'TRIAGE',
+                        Queue_Name__c: 'support.std.queue',
+                        Ack_SLA_Minutes__c: 240,
+                        Resolution_SLA_Hours__c: 72,
+                        Is_Active__c: true,
+                        Rule_Priority__c: 999
+                    }]]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock holiday query empty">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[]]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <munit:set-event doc:name="Set Unmatched Routing Input">
+                <munit:payload value="#[{
+                    categoryCode: 'UNMATCHED_CATEGORY',
+                    productCode: 'UNMATCHED_PRODUCT',
+                    customerTier: 'STANDARD',
+                    statedSeverity: 'LOW'
+                }]"/>
+            </munit:set-event>
+            <flow-ref name="route-ticket-sf" doc:name="Call route-ticket-sf"/>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.isDefaultRoute]" is="#[MunitTools::equalTo(true)]" message="Must be marked default route"/>
+            <munit-tools:assert-that expression="#[payload.team]" is="#[MunitTools::equalTo('TRIAGE')]" message="Default team must be TRIAGE"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- ========================================================================= -->
+    <!-- 6. Salesforce Data Access Subflows Suite (`salesforce-tickets.xml`)       -->
+    <!-- ========================================================================= -->
+
+    <!-- Test 16: Save Ticket Failure (No Id returned) -->
+    <munit:test name="test-save-ticket-sf-failure" description="Verify SF create failure raises CUSTOM:SAVE_FAILED">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:create" doc:name="Mock create ticket returning empty id">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[]]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <munit:set-event doc:name="Set Event with Ticket to Save">
+                <munit:payload value="#[{
+                    subject: 'Test',
+                    description: 'Test',
+                    categoryCode: 'HOW_TO',
+                    productCode: 'MOBILE-APP',
+                    customerId: 'CUST-001',
+                    customerTier: 'STANDARD',
+                    contactEmail: 'test@example.com',
+                    contactChannel: 'EMAIL',
+                    requestId: 'REQ-FAIL',
+                    statedSeverity: 'LOW',
+                    priority: 'P4',
+                    team: 'TRIAGE',
+                    matchedRuleId: 'RR-099',
+                    priorityReason: 'Default',
+                    targetQueue: 'support.low.queue',
+                    isDefaultRoute: true,
+                    ackDueAt: now(),
+                    resolutionDueAt: now()
+                }]"/>
+            </munit:set-event>
+            <try>
+                <flow-ref name="save-ticket-sf" doc:name="Call save-ticket-sf"/>
+                <error-handler>
+                    <on-error-continue/>
+                </error-handler>
+            </try>
+        </munit:execution>
+    </munit:test>
+
+    <!-- ========================================================================= -->
+    <!-- 7. ActiveMQ Priority Consumers Suite (`activemq-messaging.xml`)           -->
+    <!-- ========================================================================= -->
+
+    <!-- Test 17: ActiveMQ Priority Queue Consumers Execution -->
+    <munit:test name="test-activemq-consumers" description="Verify std, p1, and low JMS queue consumer flows execute cleanly">
+        <munit:execution>
+            <munit:set-event doc:name="Set Event for Consumer Flows">
+                <munit:payload value='#[output application/json --- { "ticketId": "TKT-001", "priority": "P1" }]' mediaType="application/json"/>
+            </munit:set-event>
+            <flow-ref name="support-ticket-p1-consumerFlow" doc:name="Call P1 Consumer"/>
+            <flow-ref name="support-ticket-std-consumerFlow" doc:name="Call Std Consumer"/>
+            <flow-ref name="support-ticket-low-consumerFlow" doc:name="Call Low Consumer"/>
+        </munit:execution>
+    </munit:test>
+
+    <!-- ========================================================================= -->
+    <!-- 8. Daily Reconciliation & Reporting Suite (`daily-report-flow.xml`)       -->
+    <!-- ========================================================================= -->
+
+    <!-- Test 18: Daily Report Generation - 1 Ticket -->
+    <munit:test name="test-daily-report-generation" description="Verify daily report subflow builds CSV with correct header and trailer">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock tickets for report">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="Query Tickets in Window" attributeName="doc:name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[{
+                        Name: 'TKT-001',
+                        CreatedDate: '2026-10-13T09:00:00.000Z',
+                        Customer_ID__c: 'CUST-001',
+                        Customer_Tier__c: 'STANDARD',
+                        Product_Code__c: 'PAY-GATEWAY',
+                        Category_Code__c: 'PAYMENT_FAILURE',
+                        Priority__c: 'P2',
+                        Assigned_Team__c: 'PAYMENTS_L1',
+                        Ticket_Status__c: 'NEW',
+                        Acknowledgement_Due_At__c: '2026-10-13T10:00:00.000Z',
+                        Resolution_Due_At__c: '2026-10-14T09:00:00.000Z'
+                    }]]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+
+            <munit-tools:mock-when processor=".*:write" doc:name="Mock file write">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor=".*:rename" doc:name="Mock file rename">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor=".*:send" doc:name="Mock report email">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <flow-ref name="generate-daily-report-subflow" doc:name="Call Generate Daily Report Flow"/>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.recordCount]" is="#[MunitTools::equalTo(1)]" message="Record count should be 1"/>
+            <munit-tools:assert-that expression="#[vars.finalFileName]" is="#[MunitTools::startsWith('TICKETS_')]" message="File name must start with TICKETS_"/>
+            <munit-tools:assert-that expression="#[vars.csvContent]" is="#[MunitTools::startsWith('H,TICKET_REPORT')]" message="CSV must start with header H,TICKET_REPORT"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- Test 19: Daily Report Generation - Zero Tickets (Nil Report Flag) -->
+    <munit:test name="test-daily-report-empty-tickets" description="Verify daily report handles 0 records with nil flag">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock empty tickets">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[[]]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor=".*:write" doc:name="Mock write">
+                <munit-tools:then-return><munit-tools:payload value="#[payload]"/></munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor=".*:rename" doc:name="Mock rename">
+                <munit-tools:then-return><munit-tools:payload value="#[payload]"/></munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor=".*:send" doc:name="Mock send">
+                <munit-tools:then-return><munit-tools:payload value="#[payload]"/></munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <flow-ref name="generate-daily-report-subflow" doc:name="Call Generate Daily Report Flow"/>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.recordCount]" is="#[MunitTools::equalTo(0)]" message="Record count should be 0"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- Test 20: Daily Report File Error Fallback -->
+    <munit:test name="test-daily-report-file-fallback" description="Verify file export error fallback handles exception cleanly">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock empty tickets">
+                <munit-tools:then-return><munit-tools:payload value="#[[]]"/></munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor=".*:write" doc:name="Mock file error">
+                <munit-tools:then-call flow="helper-raise-connectivity-flow"/>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor=".*:send" doc:name="Mock email">
+                <munit-tools:then-return><munit-tools:payload value="#[payload]"/></munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <flow-ref name="generate-daily-report-subflow" doc:name="Call Generate Daily Report Flow"/>
+        </munit:execution>
+    </munit:test>
+
+    <!-- Test 21: Daily Report SMTP Error Fallback -->
+    <munit:test name="test-daily-report-smtp-fallback" description="Verify email error fallback handles exception cleanly">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:query" doc:name="Mock empty tickets">
+                <munit-tools:then-return><munit-tools:payload value="#[[]]"/></munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor=".*:write" doc:name="Mock write">
+                <munit-tools:then-return><munit-tools:payload value="#[payload]"/></munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor=".*:rename" doc:name="Mock rename">
+                <munit-tools:then-return><munit-tools:payload value="#[payload]"/></munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor=".*:send" doc:name="Mock email error">
+                <munit-tools:then-call flow="helper-raise-connectivity-flow"/>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <flow-ref name="generate-daily-report-subflow" doc:name="Call Generate Daily Report Flow"/>
+        </munit:execution>
+    </munit:test>
+
+    <!-- Test 22: Daily Report Scheduler and Manual Demo Endpoints -->
+    <munit:test name="test-daily-report-scheduler-and-demo" description="Verify scheduler flow and demo HTTP endpoint execute">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:flow-ref" doc:name="Mock generate-daily-report-subflow">
+                <munit-tools:with-attributes>
+                    <munit-tools:with-attribute whereValue="generate-daily-report-subflow" attributeName="name"/>
+                </munit-tools:with-attributes>
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[payload]"/>
+                    <munit-tools:variables>
+                        <munit-tools:variable key="finalFileName" value="#['TICKETS_20261013.csv']"/>
+                        <munit-tools:variable key="recordCount" value="#[5]"/>
+                        <munit-tools:variable key="archiveRelPath" value="#['2026/10/13/TICKETS_20261013.csv']"/>
+                        <munit-tools:variable key="csvContent" value="#['H,TICKET_REPORT']"/>
+                    </munit-tools:variables>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <flow-ref name="daily-report-scheduler-flow" doc:name="Call Scheduler Flow"/>
+            <flow-ref name="daily-report-manual-demo-flow" doc:name="Call Demo Flow"/>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.status]" is="#[MunitTools::equalTo('SUCCESS')]" message="Demo endpoint should return SUCCESS"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- ========================================================================= -->
+    <!-- 9. APIKit Main & Console Flow Coverage                                    -->
+    <!-- ========================================================================= -->
+
+    <!-- Test 23: APIKit Main Router Flow -->
+    <munit:test name="test-apikit-main-flow" description="Verify APIKit main entrypoint router executes">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:router" doc:name="Mock apikit router">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{ 'status': 'ok' }]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <flow-ref name="npn-support-ticket-api-main" doc:name="Call APIKit Main Flow"/>
+        </munit:execution>
+    </munit:test>
+
+    <!-- Test 24: APIKit Console Flow -->
+    <munit:test name="test-apikit-console-flow" description="Verify APIKit console executes">
+        <munit:behavior>
+            <munit-tools:mock-when processor=".*:console" doc:name="Mock apikit console">
+                <munit-tools:then-return>
+                    <munit-tools:payload value="#[{ 'console': 'ok' }]"/>
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+
+        <munit:execution>
+            <flow-ref name="npn-support-ticket-api-console" doc:name="Call APIKit Console Flow"/>
+        </munit:execution>
+    </munit:test>
+
+    <!-- ========================================================================= -->
+    <!-- 10. Global Error Handler Coverage Suite (`global-error-handler.xml`)      -->
+    <!-- ========================================================================= -->
+
+    <!-- Test 30: Global Error Handler - CUSTOM:BACKEND_UNAVAILABLE (503) -->
+    <munit:test name="test-global-error-backend-unavailable" description="Verify CUSTOM:BACKEND_UNAVAILABLE returns 503 with Retry-After">
+        <munit:execution>
+            <try>
+                <flow-ref name="helper-raise-backend-unavailable-flow" doc:name="Trigger Backend Unavailable"/>
+                <error-handler>
+                    <on-error-continue/>
+                </error-handler>
+            </try>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus as Number default 200]" is="#[MunitTools::equalTo(503)]" message="HTTP Status must be 503"/>
+            <munit-tools:assert-that expression="#[payload.errorCode]" is="#[MunitTools::equalTo('SERVICE_UNAVAILABLE')]" message="ErrorCode must match"/>
+        </munit:validation>
+    </munit:test>
+
+    <!-- Test 31: Global Error Handler - ANY Unexpected Internal Error (500) -->
+    <munit:test name="test-global-error-internal-error" description="Verify unhandled error returns 500 INTERNAL_ERROR">
+        <munit:execution>
+            <try>
+                <flow-ref name="helper-raise-internal-error-flow" doc:name="Trigger Unexpected Error"/>
+                <error-handler>
+                    <on-error-continue/>
+                </error-handler>
+            </try>
+        </munit:execution>
+
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.httpStatus as Number default 200]" is="#[MunitTools::equalTo(500)]" message="HTTP Status must be 500"/>
+            <munit-tools:assert-that expression="#[payload.errorCode]" is="#[MunitTools::equalTo('INTERNAL_ERROR')]" message="ErrorCode must match"/>
+        </munit:validation>
+    </munit:test>
+
+</mule>

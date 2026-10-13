@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:jms="http://www.mulesoft.org/schema/mule/jms"
+      xmlns:email="http://www.mulesoft.org/schema/mule/email"
+      xmlns:file="http://www.mulesoft.org/schema/mule/file"
+      xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/jms http://www.mulesoft.org/schema/mule/jms/current/mule-jms.xsd
+        http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd
+        http://www.mulesoft.org/schema/mule/file http://www.mulesoft.org/schema/mule/file/current/mule-file.xsd
+        http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd">
+
+    <!-- Environment and Property Configurations -->
+    <global-property name="env" value="dev" doc:name="Global Property"/>
+    <configuration-properties file="config-local.properties" doc:name="Local properties"/>
+    <configuration-properties file="config-${env}.properties" doc:name="Configuration properties"/>
+    <configuration defaultErrorHandler-ref="global-error-handler"/>
+
+    <!-- Salesforce Configuration (OAuth Client Credentials) -->
+    <salesforce:sfdc-config name="Salesforce_Config" doc:name="Salesforce Config">
+        <salesforce:oauth-client-credentials-connection>
+            <salesforce:oauth-client-credentials clientId="${sf.clientId}" clientSecret="${sf.clientSecret}" tokenUrl="${sf.tokenUrl}"/>
+        </salesforce:oauth-client-credentials-connection>
+    </salesforce:sfdc-config>
+
+    <!-- ActiveMQ JMS Configuration with auto-reconnect resilience -->
+    <jms:config name="ActiveMQ_Config" doc:name="ActiveMQ JMS Config">
+        <jms:active-mq-connection>
+            <reconnection failsDeployment="false">
+                <reconnect count="2" frequency="2000" />
+            </reconnection>
+            <jms:factory-configuration brokerUrl="${jms.brokerUrl}" maxRedelivery="3"/>
+        </jms:active-mq-connection>
+    </jms:config>
+
+    <!-- Email SMTP Configuration with auto-reconnect resilience and STARTTLS for Gmail -->
+    <email:smtp-config name="Email_SMTP" doc:name="Email SMTP Config">
+        <email:smtp-connection host="${smtp.host}" port="${smtp.port}" user="${smtp.user}" password="${smtp.password}">
+            <reconnection failsDeployment="false">
+                <reconnect count="2" frequency="2000" />
+            </reconnection>
+            <email:properties>
+                <email:property key="mail.smtp.starttls.enable" value="${smtp.starttls.enable}" />
+            </email:properties>
+        </email:smtp-connection>
+    </email:smtp-config>
+
+    <!-- File System Configuration for Daily Report Export -->
+    <file:config name="File_Config" doc:name="File Config" />
+
+</mule>

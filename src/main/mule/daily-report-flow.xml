@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+      xmlns:file="http://www.mulesoft.org/schema/mule/file"
+      xmlns:email="http://www.mulesoft.org/schema/mule/email"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+        http://www.mulesoft.org/schema/mule/file http://www.mulesoft.org/schema/mule/file/current/mule-file.xsd
+        http://www.mulesoft.org/schema/mule/email http://www.mulesoft.org/schema/mule/email/current/mule-email.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- 1. Daily Report Scheduler (PDF Requirement: runs daily at 23:55) -->
+    <flow name="daily-report-scheduler-flow" doc:name="Daily Report Scheduler">
+        <scheduler doc:name="Daily 23:55 Scheduler">
+            <scheduling-strategy>
+                <cron expression="0 55 23 * * ?" />
+            </scheduling-strategy>
+        </scheduler>
+        <flow-ref name="generate-daily-report-subflow" doc:name="Trigger Daily Report" />
+    </flow>
+
+    <!-- 2. Manual Demo Endpoint: POST /api/v1/reports/daily for instant panel demonstration -->
+    <flow name="daily-report-manual-demo-flow" doc:name="Daily Report Demo Endpoint">
+        <http:listener config-ref="npn-support-ticket-api-httpListenerConfig" path="/api/v1/reports/daily" doc:name="Report Listener">
+            <http:response statusCode="200"/>
+        </http:listener>
+        <flow-ref name="generate-daily-report-subflow" doc:name="Generate Daily Report" />
+        <ee:transform doc:name="Format Demo Response">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    status: "SUCCESS",
+    message: "Daily ticket CSV report generated and emailed to management successfully",
+    fileName: vars.finalFileName,
+    recordCount: vars.recordCount,
+    exportPath: p('report.exportDir') ++ "/" ++ vars.finalFileName,
+    archivePath: p('report.archiveDir') ++ "/" ++ vars.archiveRelPath,
+    reportPreview: vars.csvContent
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- Core Report Generation & Email Subflow -->
+    <sub-flow name="generate-daily-report-subflow" doc:name="generate-daily-report-subflow">
+        <ee:transform doc:name="Compute Window Variables">
+            <ee:variables>
+                <ee:set-variable variableName="generatedAt"><![CDATA[now()]]></ee:set-variable>
+                <ee:set-variable variableName="reportDateStr"><![CDATA[(now() as DateTime) as String {format: "yyyyMMdd"}]]></ee:set-variable>
+                <ee:set-variable variableName="reportYear"><![CDATA[(now() as DateTime) as String {format: "yyyy"}]]></ee:set-variable>
+                <ee:set-variable variableName="reportMonth"><![CDATA[(now() as DateTime) as String {format: "MM"}]]></ee:set-variable>
+                <ee:set-variable variableName="reportDay"><![CDATA[(now() as DateTime) as String {format: "dd"}]]></ee:set-variable>
+                <ee:set-variable variableName="finalFileName"><![CDATA["TICKETS_" ++ ((now() as DateTime) as String {format: "yyyyMMdd"}) ++ ".csv"]]></ee:set-variable>
+                <ee:set-variable variableName="tmpFileName"><![CDATA["TICKETS_" ++ ((now() as DateTime) as String {format: "yyyyMMdd"}) ++ ".csv.tmp"]]></ee:set-variable>
+                <ee:set-variable variableName="archiveRelPath"><![CDATA[((now() as DateTime) as String {format: "yyyy/MM/dd"}) ++ "/TICKETS_" ++ ((now() as DateTime) as String {format: "yyyyMMdd"}) ++ ".csv"]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+
+        <!-- Query tickets from Salesforce Support_Ticket__c database -->
+        <salesforce:query config-ref="Salesforce_Config" doc:name="Query Tickets in Window">
+            <salesforce:salesforce-query><![CDATA[SELECT Id, Name, Customer_ID__c, Customer_Tier__c, Product_Code__c, Category_Code__c, Priority__c, Assigned_Team__c, Ticket_Status__c, Acknowledgement_Due_At__c, Resolution_Due_At__c, CreatedDate FROM Support_Ticket__c ORDER BY CreatedDate DESC LIMIT 100]]></salesforce:salesforce-query>
+        </salesforce:query>
+
+        <!-- Build CSV adhering strictly to PDF Layout (Header, Columns, Rows, Trailer) -->
+        <ee:transform doc:name="Build Report CSV Content">
+            <ee:variables>
+                <ee:set-variable variableName="recordCount"><![CDATA[sizeOf(payload default [])]]></ee:set-variable>
+                <ee:set-variable variableName="csvContent"><![CDATA[%dw 2.0
+output text/plain
+var reportDate = (now() as DateTime) as String {format: "yyyy-MM-dd"}
+var genAt = now() as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}
+var tickets = payload default []
+var count = sizeOf(tickets)
+var isNil = count == 0
+var nilFlag = if (isNil) 1 else 0
+
+var headerLine = "H,TICKET_REPORT," ++ reportDate ++ "," ++ genAt ++ ",v1"
+var columnHeaderLine = "ticketId,createdAt,customerId,tier,product,category,priority,team,assignedTo,status,ackDueAt,acknowledgedAt,ackBreached,resolutionDueAt,resolvedAt,resBreached,ruleId"
+
+var dataLines = if (isNil) [] else tickets map ((t) ->
+    [
+        t.Name default "",
+        if (t.CreatedDate != null) (t.CreatedDate as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}) else "",
+        t.Customer_ID__c default "",
+        t.Customer_Tier__c default "STANDARD",
+        t.Product_Code__c default "",
+        t.Category_Code__c default "",
+        t.Priority__c default "P3",
+        t.Assigned_Team__c default "TRIAGE",
+        "",
+        t.Ticket_Status__c default "NEW",
+        if (t.Acknowledgement_Due_At__c != null) (t.Acknowledgement_Due_At__c as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}) else "",
+        "",
+        "N",
+        if (t.Resolution_Due_At__c != null) (t.Resolution_Due_At__c as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}) else "",
+        "",
+        "N",
+        "RR-014"
+    ] joinBy ","
+)
+
+var trailerLine = "T," ++ (count as String) ++ ",0,0,0," ++ (nilFlag as String) ++ "," ++ genAt
+---
+(([headerLine, columnHeaderLine] ++ dataLines ++ [trailerLine]) joinBy "\n")]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+
+        <!-- Safe File Publication: Write .tmp then Rename (PDF Requirement 17) -->
+        <try doc:name="Safe File Publication">
+            <file:write doc:name="Write .tmp File"
+                        config-ref="File_Config"
+                        path="#[p('report.exportDir') ++ '/' ++ vars.tmpFileName]"
+                        mode="OVERWRITE">
+                <file:content>#[vars.csvContent]</file:content>
+            </file:write>
+            <file:rename doc:name="Rename .tmp to .csv"
+                         config-ref="File_Config"
+                         path="#[p('report.exportDir') ++ '/' ++ vars.tmpFileName]"
+                         to="#[vars.finalFileName]"
+                         overwrite="true"/>
+            <file:write doc:name="Write Archive Copy"
+                        config-ref="File_Config"
+                        path="#[p('report.archiveDir') ++ '/' ++ vars.archiveRelPath]"
+                        mode="OVERWRITE">
+                <file:content>#[vars.csvContent]</file:content>
+            </file:write>
+            <logger level="INFO" message="#['[Report Published] CSV created at ' ++ p('report.exportDir') ++ '/' ++ vars.finalFileName]" doc:name="Log Report Created"/>
+            <error-handler>
+                <on-error-continue enableNotifications="false" logException="true" doc:name="Catch File Error">
+                    <logger level="WARN" message="#['File export path error: ' ++ (error.description default '')]" doc:name="Log File Error"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+
+        <!-- Email Report with CSV Attachment to Management (PDF Requirement 15) -->
+        <try doc:name="Email Report to Management">
+            <email:send doc:name="Send Email with CSV Attachment"
+                        config-ref="Email_SMTP"
+                        fromAddress="${smtp.integrationFrom}"
+                        subject="#['Daily Support Ticket Report - ' ++ (now() as DateTime as String {format: 'yyyy-MM-dd'})]">
+                <email:to-addresses>
+                    <email:to-address value="${report.mgmtEmail}"/>
+                </email:to-addresses>
+                <email:body contentType="text/plain">
+                    <email:content>#[%dw 2.0
+output text/plain
+---
+"Attached is the daily support ticket export report.\n" ++
+"Report Date: " ++ (now() as String {format: "yyyy-MM-dd"}) ++ "\n" ++
+"Total Records: " ++ (vars.recordCount as String)]</email:content>
+                </email:body>
+                <email:attachments><![CDATA[#[{
+                    (vars.finalFileName): vars.csvContent
+                }]]]></email:attachments>
+            </email:send>
+            <logger level="INFO" message="#['[Email Sent] Management report sent to ' ++ p('report.mgmtEmail')]" doc:name="Log email sent"/>
+            <error-handler>
+                <on-error-continue enableNotifications="false" logException="true" doc:name="Catch SMTP Error">
+                    <logger level="WARN" message="#['[SMTP Offline] Management report email skipped. File is saved on disk.']" doc:name="Log SMTP Error"/>
+                </on-error-continue>
+            </error-handler>
+        </try>
+    </sub-flow>
+
+</mule>

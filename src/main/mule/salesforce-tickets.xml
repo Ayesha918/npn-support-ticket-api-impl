@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd">
+
+    <sub-flow name="find-ticket-sf">
+        <salesforce:query config-ref="Salesforce_Config" doc:name="Query by request id">
+            <salesforce:salesforce-query><![CDATA[SELECT Id, Name, Request_ID__c, Ticket_Status__c, Priority__c, Assigned_Team__c, Customer_Tier__c, Acknowledgement_Due_At__c, Resolution_Due_At__c, CreatedDate FROM Support_Ticket__c WHERE Request_ID__c = ':requestId' LIMIT 1]]></salesforce:salesforce-query>
+            <salesforce:parameters><![CDATA[#[{requestId: vars.requestId}]]]></salesforce:parameters>
+        </salesforce:query>
+        <ee:transform doc:name="Map to contract or null">
+            <ee:message><ee:set-payload><![CDATA[%dw 2.0
+import toContract from dwl::TicketMapper
+input payload application/java
+output application/java
+---
+if (isEmpty(payload)) null else toContract(payload[0])]]></ee:set-payload></ee:message>
+        </ee:transform>
+    </sub-flow>
+
+    <sub-flow name="save-ticket-sf">
+        <set-variable variableName="ticketToSave" value="#[payload]" doc:name="Keep ticket"/>
+        <ee:transform doc:name="Map to Salesforce record">
+            <ee:message><ee:set-payload><![CDATA[%dw 2.0
+import toSalesforce from dwl::StatusMap
+output application/java
+var t = vars.ticketToSave
+---
+[
+  {
+    Subject__c: t.subject,
+    Description__c: t.description,
+    Category_Code__c: t.categoryCode,
+    Product_Code__c: t.productCode,
+    Customer_ID__c: t.customerId,
+    Customer_Tier__c: t.customerTier default "STANDARD",
+    Contact_Email__c: t.contactEmail,
+    Contact_Channel__c: t.contactChannel,
+    Request_ID__c: t.requestId,
+    Stated_Severity__c: t.statedSeverity,
+    Ticket_Status__c: toSalesforce("NEW"),
+    Priority__c: t.priority,
+    Assigned_Team__c: t.team,
+    Acknowledgement_Due_At__c: if (t.ackDueAt != null) (t.ackDueAt as DateTime) else null,
+    Resolution_Due_At__c: if (t.resolutionDueAt != null) (t.resolutionDueAt as DateTime) else null
+  }
+]
+]]></ee:set-payload></ee:message>
+        </ee:transform>
+        <salesforce:create type="Support_Ticket__c" config-ref="Salesforce_Config" doc:name="Create ticket"/>
+        <logger level="INFO" message="#['Salesforce create response: ' ++ write(payload, 'application/json')]"/>
+        <set-variable variableName="sfId" value="#[(payload.id[0] default payload[0].id default payload.items[0].id)]" doc:name="Keep Salesforce Id"/>
+        <choice doc:name="Created?">
+            <when expression="#[isEmpty(vars.sfId)]">
+                <raise-error type="CUSTOM:SAVE_FAILED" description="Ticket could not be saved." doc:name="Save failed"/>
+            </when>
+        </choice>
+        <salesforce:query config-ref="Salesforce_Config" doc:name="Read back by Id">
+            <salesforce:salesforce-query><![CDATA[SELECT Id, Name, Request_ID__c, Ticket_Status__c, Priority__c, Assigned_Team__c, Customer_Tier__c, Acknowledgement_Due_At__c, Resolution_Due_At__c, CreatedDate FROM Support_Ticket__c WHERE Id = ':id']]></salesforce:salesforce-query>
+            <salesforce:parameters><![CDATA[#[{id: vars.sfId}]]]></salesforce:parameters>
+        </salesforce:query>
+        <ee:transform doc:name="Map to contract">
+            <ee:message><ee:set-payload><![CDATA[%dw 2.0
+import toContract from dwl::TicketMapper
+input payload application/java
+output application/java
+---
+toContract(payload[0]) ++ {
+  matchedRuleId: vars.ticketToSave.matchedRuleId,
+  priorityReason: vars.ticketToSave.priorityReason,
+  targetQueue: vars.ticketToSave.targetQueue,
+  isDefaultRoute: vars.ticketToSave.isDefaultRoute
+}]]></ee:set-payload></ee:message>
+        </ee:transform>
+    </sub-flow>
+
+    <sub-flow name="get-ticket-by-id-sf">
+        <salesforce:query config-ref="Salesforce_Config" doc:name="Query by ticketId">
+            <salesforce:salesforce-query><![CDATA[SELECT Id, Name, Request_ID__c, Ticket_Status__c, Priority__c, Assigned_Team__c, Customer_Tier__c, Acknowledgement_Due_At__c, Resolution_Due_At__c, CreatedDate FROM Support_Ticket__c WHERE Name = ':ticketId' LIMIT 1]]></salesforce:salesforce-query>
+            <salesforce:parameters><![CDATA[#[{ticketId: vars.ticketId}]]]></salesforce:parameters>
+        </salesforce:query>
+        <ee:transform doc:name="Map to contract or null">
+            <ee:message><ee:set-payload><![CDATA[%dw 2.0
+import toContract from dwl::TicketMapper
+input payload application/java
+output application/java
+---
+if (isEmpty(payload)) null else toContract(payload[0])]]></ee:set-payload></ee:message>
+        </ee:transform>
+    </sub-flow>
+
+    <sub-flow name="update-ticket-status-sf">
+        <ee:transform doc:name="Map update record">
+            <ee:message><ee:set-payload><![CDATA[%dw 2.0
+import toSalesforce from dwl::StatusMap
+output application/java
+---
+[
+  {
+    Id: vars.ticketSfId,
+    Ticket_Status__c: toSalesforce(vars.newStatus)
+  }
+]
+]]></ee:set-payload></ee:message>
+        </ee:transform>
+        <salesforce:update type="Support_Ticket__c" config-ref="Salesforce_Config" doc:name="Update ticket status"/>
+        <flow-ref name="get-ticket-by-id-sf" doc:name="Refresh ticket"/>
+    </sub-flow>
+
+</mule>

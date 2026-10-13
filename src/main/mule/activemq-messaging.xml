@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:jms="http://www.mulesoft.org/schema/mule/jms"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/jms http://www.mulesoft.org/schema/mule/jms/current/mule-jms.xsd">
+
+    <!-- ActiveMQ Priority Queue Consumers (PDF Requirement 3: Critical, Standard, Low) -->
+    <flow name="support-ticket-std-consumerFlow">
+        <jms:listener doc:name="On Std Message" config-ref="ActiveMQ_Config" destination="support.std.queue" ackMode="AUTO">
+            <jms:consumer-type>
+                <jms:queue-consumer />
+            </jms:consumer-type>
+            <jms:response sendCorrelationId="AUTO" />
+        </jms:listener>
+        <logger level="INFO" doc:name="Log Std Ticket" message="#['[Std Queue Consumer] Consumed standard ticket: ' ++ write(payload, 'application/json')]" />
+    </flow>
+	<flow name="support-ticket-p1-consumerFlow">
+        <jms:listener doc:name="On P1 Message" config-ref="ActiveMQ_Config" destination="support.p1.queue" ackMode="AUTO">
+            <jms:consumer-type>
+                <jms:queue-consumer/>
+            </jms:consumer-type>
+            <jms:response sendCorrelationId="AUTO"/>
+        </jms:listener>
+        <logger level="INFO" doc:name="Log P1 Ticket" message="#['[P1 Queue Consumer] Consumed critical ticket: ' ++ write(payload, 'application/json')]"/>
+    </flow>
+
+    <flow name="support-ticket-low-consumerFlow">
+        <jms:listener doc:name="On Low Message" config-ref="ActiveMQ_Config" destination="support.low.queue" ackMode="AUTO">
+            <jms:consumer-type>
+                <jms:queue-consumer/>
+            </jms:consumer-type>
+            <jms:response sendCorrelationId="AUTO"/>
+        </jms:listener>
+        <logger level="INFO" doc:name="Log Low Ticket" message="#['[Low Queue Consumer] Consumed low ticket: ' ++ write(payload, 'application/json')]"/>
+    </flow>
+
+</mule>

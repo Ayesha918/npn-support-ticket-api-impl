@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd">
+
+    <sub-flow name="route-ticket-sf">
+        <set-variable variableName="routingInput" value="#[payload]" doc:name="Keep routing input"/>
+
+        <salesforce:query config-ref="Salesforce_Config" doc:name="Routing rules query">
+            <salesforce:salesforce-query><![CDATA[SELECT Id, Name, Category_Code__c, Product_Code__c,
+       Customer_Tier__c, Stated_Severity__c,
+       Assigned_Priority__c, Assigned_Team__c,
+       Queue_Name__c, Ack_SLA_Minutes__c,
+       Resolution_SLA_Hours__c,
+       Is_Active__c, Rule_Priority__c
+FROM Routing_Rule__c
+WHERE Is_Active__c = true
+ORDER BY Rule_Priority__c ASC]]></salesforce:salesforce-query>
+        </salesforce:query>
+        <set-variable variableName="routingRules" value="#[payload]" doc:name="Keep rules"/>
+
+        <salesforce:query config-ref="Salesforce_Config" doc:name="Holiday query">
+            <salesforce:salesforce-query><![CDATA[SELECT Id, Name, Holiday_Date__c FROM Business_Holiday__c]]></salesforce:salesforce-query>
+        </salesforce:query>
+        <set-variable variableName="holidays" value="#[payload]" doc:name="Keep holidays"/>
+
+        <ee:transform doc:name="Match rule and compute due times">
+            <ee:message><ee:set-payload><![CDATA[%dw 2.0
+output application/java
+
+fun norm(value) = upper(trim((value default "") as String))
+
+fun ruleMatches(ruleValue, ticketValue) =
+    do {
+      var r = norm(ruleValue)
+      var t = norm(ticketValue)
+      ---
+      r == "" or r == "ALL" or r == "ANY" or r == "*" or r == t
+    }
+
+fun isHoliday(day, holidays) =
+    !isEmpty(holidays filter (h) -> (h as Date) == (day as Date))
+
+fun isBusinessDay(day, holidays) =
+    (day as Date).dayOfWeek >= 1 and
+    (day as Date).dayOfWeek <= 5 and
+    (!isHoliday(day, holidays))
+
+fun nextBusinessStart(dt, holidays) =
+    do {
+        var day = dt as Date
+        var start = day ++ |09:00:00|
+        var finish = day ++ |17:00:00|
+        ---
+        if ((!isBusinessDay(day, holidays)) or dt >= finish)
+            nextBusinessStart((day + |P1D|) ++ |09:00:00|, holidays)
+        else if (dt < start)
+            start
+        else
+            dt
+    }
+
+fun addBusinessMinutes(start, remaining, holidays) =
+    if (remaining <= 0)
+        start
+    else
+        do {
+            var current = nextBusinessStart(start, holidays)
+            var day = current as Date
+            var finish = day ++ |17:00:00|
+            var available = ((finish - current) as Number {unit: "minutes"})
+            ---
+            if (remaining <= available)
+                current + (("PT" ++ ((remaining as Number) as String {format: "0"}) ++ "M") as Period)
+            else
+                addBusinessMinutes((day + |P1D|) ++ |09:00:00|, remaining - available, holidays)
+        }
+
+fun calculateAckDue(start, priority, ackMinutes, holidays) =
+    if (upper(priority default "P3") == "P1")
+        start + (("PT" ++ (ackMinutes as String {format: "0"}) ++ "M") as Period)
+    else
+        addBusinessMinutes(start, ackMinutes, holidays)
+
+var routeIn = vars.routingInput
+var rules = vars.routingRules
+var holidays = (vars.holidays default []) map ((h) -> h.Holiday_Date__c as Date)
+
+var matchingRules =
+    (rules filter (r) ->
+        ruleMatches(r.Category_Code__c, routeIn.categoryCode) and
+        ruleMatches(r.Product_Code__c, routeIn.productCode) and
+        ruleMatches(r.Customer_Tier__c, routeIn.customerTier) and
+        ruleMatches(r.Stated_Severity__c, routeIn.statedSeverity)
+    ) orderBy ((r) -> (r.Rule_Priority__c as Number) default 999)
+
+var selectedRule =
+    if (!isEmpty(matchingRules))
+        matchingRules[0]
+    else
+        (rules filter (r) -> r.Name == "RR-099")[0] default {}
+
+var isDefaultRoute = isEmpty(matchingRules) or selectedRule.Name == "RR-099"
+var ackMinutes = (selectedRule.Ack_SLA_Minutes__c default 240) as Number
+var resolutionHours = (selectedRule.Resolution_SLA_Hours__c default 72) as Number
+var priority = upper(selectedRule.Assigned_Priority__c default "P3")
+
+var ackDueAt = calculateAckDue(now(), priority, ackMinutes, holidays)
+var resolutionDueAt =
+    if (priority == "P1")
+        now() + (("PT" ++ ((resolutionHours * 60) as String {format: "0"}) ++ "M") as Period)
+    else
+        addBusinessMinutes(now(), resolutionHours * 60, holidays)
+---
+{
+  matchedRuleId: selectedRule.Name default "RR-099",
+  priority: priority,
+  team: selectedRule.Assigned_Team__c default "TRIAGE",
+  targetQueue: selectedRule.Queue_Name__c default "support.std.queue",
+  priorityReason: if (isDefaultRoute) "Default route: no rule matched" else "Rule $(selectedRule.Name): priority $(priority)",
+  isDefaultRoute: isDefaultRoute,
+  ackDueAt: ackDueAt as String,
+  resolutionDueAt: resolutionDueAt as String
+}]]></ee:set-payload></ee:message>
+        </ee:transform>
+    </sub-flow>
+
+</mule>
