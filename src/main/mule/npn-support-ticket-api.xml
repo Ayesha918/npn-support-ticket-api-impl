@@ -404,22 +404,9 @@ isAllowed(vars.currentStatus, vars.newStatus)]]></ee:set-variable>
     <!-- Subflow: Build Status Response -->
     <sub-flow name="build-status-response">
         <ee:transform doc:name="Status response">
-            <ee:message><ee:set-payload><![CDATA[%dw 2.0
-output application/json skipNullOn="everywhere"
-var ackDue = if (payload.ackDueAt != null) payload.ackDueAt as DateTime else null
-var acked = if (payload.acknowledgedAt != null) payload.acknowledgedAt as DateTime else null
----
-{
-  ticketId: payload.ticketId,
-  status: payload.status,
-  priority: payload.priority,
-  team: payload.team,
-  assignedTo: payload.assignedTo,
-  assignedAt: payload.assignedAt,
-  acknowledgedAt: payload.acknowledgedAt,
-  ackDueAt: payload.ackDueAt,
-  ackBreached: if (ackDue == null) false else if (acked != null) (acked > ackDue) else (now() > ackDue)
-}]]></ee:set-payload></ee:message>
+            <ee:message>
+                <ee:set-payload resource="dwl/build_status_response.dwl" />
+            </ee:message>
         </ee:transform>
     </sub-flow>
 
