@@ -9,8 +9,27 @@ output text/plain
   Trailer row: T,record_count,ack_breaches,res_breaches,default_routes,nil_report_flag,generated_at
 */
 
-var reportDate = (vars.windowEnd as DateTime) as String {format: "yyyy-MM-dd"}
-var generatedAtStr = vars.generatedAt as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}
+fun toIst(val) =
+  if (val == null) ""
+  else do {
+    var dt = (val as DateTime default null)
+    ---
+    if (dt != null) ((dt >> "+05:30") as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"})
+    else (val as String)
+  }
+
+var reportDate = do {
+  var dt = (vars.windowEnd as DateTime default (now() >> "+05:30"))
+  ---
+  ((dt >> "+05:30") as String {format: "yyyy-MM-dd"})
+}
+
+var generatedAtStr = do {
+  var dt = (vars.generatedAt as DateTime default (now() >> "+05:30"))
+  ---
+  ((dt >> "+05:30") as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"})
+}
+
 var tickets = payload default []
 var recordCount = sizeOf(tickets)
 var isNil = recordCount == 0
@@ -26,7 +45,7 @@ var columnHeaderLine = "ticketId,createdAt,customerId,tier,product,category,prio
 var dataLines = if (isNil) [] else (tickets default []) map ((t, idx) -> 
     [
         t.ticket_id default "",
-        if (t.created_at != null) (t.created_at as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}) else "",
+        toIst(t.created_at),
         t.customer_id default "",
         t.customer_tier default "",
         t.product_code default "",
@@ -35,11 +54,11 @@ var dataLines = if (isNil) [] else (tickets default []) map ((t, idx) ->
         t.team default "",
         t.assigned_to default "",
         t.status default "",
-        if (t.ack_due_at != null) (t.ack_due_at as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}) else "",
-        if (t.acknowledged_at != null) (t.acknowledged_at as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}) else "",
+        toIst(t.ack_due_at),
+        toIst(t.acknowledged_at),
         if (t.ack_breached == "Y" or t.ack_breached == true) "Y" else "N",
-        if (t.resolution_due_at != null) (t.resolution_due_at as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}) else "",
-        if (t.resolved_at != null) (t.resolved_at as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}) else "",
+        toIst(t.resolution_due_at),
+        toIst(t.resolved_at),
         if (t.res_breached == "Y" or t.res_breached == true) "Y" else "N",
         t.matched_rule_id default ""
     ] joinBy ","

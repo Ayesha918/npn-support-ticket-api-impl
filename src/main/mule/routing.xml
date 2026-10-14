@@ -53,37 +53,38 @@ fun isBusinessDay(day, holidays) =
 
 fun nextBusinessStart(dt, holidays) =
     do {
-        var day = dt as Date
-        var start = day ++ |09:00:00|
-        var finish = day ++ |17:00:00|
+        var current = dt >> "+05:30"
+        var day = current as Date
+        var start = (day ++ |09:00:00+05:30|)
+        var finish = (day ++ |17:00:00+05:30|)
         ---
-        if ((!isBusinessDay(day, holidays)) or dt >= finish)
-            nextBusinessStart((day + |P1D|) ++ |09:00:00|, holidays)
-        else if (dt < start)
+        if ((!isBusinessDay(day, holidays)) or current >= finish)
+            nextBusinessStart(((day + |P1D|) ++ |09:00:00+05:30|), holidays)
+        else if (current < start)
             start
         else
-            dt
+            current
     }
 
 fun addBusinessMinutes(start, remaining, holidays) =
     if (remaining <= 0)
-        start
+        start >> "+05:30"
     else
         do {
             var current = nextBusinessStart(start, holidays)
             var day = current as Date
-            var finish = day ++ |17:00:00|
+            var finish = (day ++ |17:00:00+05:30|)
             var available = ((finish - current) as Number {unit: "minutes"})
             ---
             if (remaining <= available)
-                current + (("PT" ++ ((remaining as Number) as String {format: "0"}) ++ "M") as Period)
+                (current + (("PT" ++ ((remaining as Number) as String {format: "0"}) ++ "M") as Period)) >> "+05:30"
             else
-                addBusinessMinutes((day + |P1D|) ++ |09:00:00|, remaining - available, holidays)
+                addBusinessMinutes(((day + |P1D|) ++ |09:00:00+05:30|), remaining - available, holidays)
         }
 
 fun calculateAckDue(start, priority, ackMinutes, holidays) =
     if (upper(priority default "P3") == "P1")
-        start + (("PT" ++ (ackMinutes as String {format: "0"}) ++ "M") as Period)
+        (start >> "+05:30") + (("PT" ++ (ackMinutes as String {format: "0"}) ++ "M") as Period)
     else
         addBusinessMinutes(start, ackMinutes, holidays)
 
@@ -110,12 +111,13 @@ var ackMinutes = (selectedRule.Ack_SLA_Minutes__c default 240) as Number
 var resolutionHours = (selectedRule.Resolution_SLA_Hours__c default 72) as Number
 var priority = upper(selectedRule.Assigned_Priority__c default "P3")
 
-var ackDueAt = calculateAckDue(now(), priority, ackMinutes, holidays)
+var nowIst = now() >> "+05:30"
+var ackDueAt = calculateAckDue(nowIst, priority, ackMinutes, holidays)
 var resolutionDueAt =
     if (priority == "P1")
-        now() + (("PT" ++ ((resolutionHours * 60) as String {format: "0"}) ++ "M") as Period)
+        nowIst + (("PT" ++ ((resolutionHours * 60) as String {format: "0"}) ++ "M") as Period)
     else
-        addBusinessMinutes(now(), resolutionHours * 60, holidays)
+        addBusinessMinutes(nowIst, resolutionHours * 60, holidays)
 ---
 {
   matchedRuleId: selectedRule.Name default "RR-099",
@@ -124,8 +126,8 @@ var resolutionDueAt =
   targetQueue: selectedRule.Queue_Name__c default "support.std.queue",
   priorityReason: if (isDefaultRoute) "Default route: no rule matched" else "Rule $(selectedRule.Name): priority $(priority)",
   isDefaultRoute: isDefaultRoute,
-  ackDueAt: ackDueAt as String,
-  resolutionDueAt: resolutionDueAt as String
+  ackDueAt: (ackDueAt >> "+05:30") as String {format: "yyyy-MM-dd'T'HH:mm:ss.SSSXXX"},
+  resolutionDueAt: (resolutionDueAt >> "+05:30") as String {format: "yyyy-MM-dd'T'HH:mm:ss.SSSXXX"}
 }]]></ee:set-payload></ee:message>
         </ee:transform>
     </sub-flow>

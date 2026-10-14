@@ -75,41 +75,159 @@ output application/json
                 <ee:set-variable variableName="recordCount"><![CDATA[sizeOf(payload default [])]]></ee:set-variable>
                 <ee:set-variable variableName="csvContent"><![CDATA[%dw 2.0
 output text/plain
-var reportDate = (now() as DateTime) as String {format: "yyyy-MM-dd"}
-var genAt = now() as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}
+
+/*
+ report_csv.dwl - Daily ticket report
+ H,TICKET_REPORT,report_date,generated_at,v1
+ column header row
+ one line per ticket
+ T,record_count,ack_breaches,res_breaches,default_routes,nil_flag,generated_at
+
+ Columns: ticketId, createdAt, customerId, tier, product, category,
+          priority, team, status, ackDueAt, resolutionDueAt
+
+ Input:
+ payload = result of the Salesforce query on Support_Ticket__c
+ vars.generatedAt = now() set at the start of the sub-flow
+*/
+
+// String / DateTime / null -> DateTime / null
+fun toDT(v) =
+    if (v == null)
+        null
+    else if (v is DateTime)
+        v
+    else if (trim(v as String) == "")
+        null
+    else
+        ((v as String) replace /\+0000$/ with "Z") as DateTime
+
+// Convert a timestamp to IST (+05:30).
+// Blank when the value is missing.
+fun fmt(v) = do {
+    var d = toDT(v)
+    ---
+    if (d == null)
+        ""
+    else
+        ((d >> "Asia/Kolkata") as String {
+            format: "yyyy-MM-dd'T'HH:mm:ssXXX"
+        })
+}
+
+// Quote a CSV field when it contains a comma, quote or newline.
+fun esc(v) = do {
+    var s = (v default "") as String
+    ---
+    if (s contains /[,"\n\r]/)
+        ("\"" ++ (s replace "\"" with "\"\"") ++ "\"")
+    else
+        s
+}
+
+var genAt = toDT(vars.generatedAt)
+var genAtStr = fmt(vars.generatedAt)
+
+var reportDate =
+    if (genAt == null)
+        ""
+    else
+        ((genAt >> "Asia/Kolkata") as String {
+            format: "yyyy-MM-dd"
+        })
+
 var tickets = payload default []
+
+// Acknowledgement breached:
+// Acknowledged late, or not acknowledged and past due.
+fun ackBreached(t) = do {
+    var due = toDT(t.Acknowledgement_Due_At__c)
+    var ack = toDT(t.Acknowledged_At__c)
+    ---
+    if (due == null)
+        false
+    else if (ack != null)
+        ack > due
+    else if (genAt != null)
+        genAt > due
+    else
+        false
+}
+
+// Resolution breached:
+// Resolved late, or not resolved and already past due.
+fun resBreached(t) = do {
+    var due = toDT(t.Resolution_Due_At__c)
+    var done = toDT(t.Resolved_At__c)
+    ---
+    if (due == null)
+        false
+    else if (done != null)
+        done > due
+    else if (genAt != null)
+        genAt > due
+    else
+        false
+}
+
 var count = sizeOf(tickets)
 var isNil = count == 0
 var nilFlag = if (isNil) 1 else 0
 
-var headerLine = "H,TICKET_REPORT," ++ reportDate ++ "," ++ genAt ++ ",v1"
-var columnHeaderLine = "ticketId,createdAt,customerId,tier,product,category,priority,team,assignedTo,status,ackDueAt,acknowledgedAt,ackBreached,resolutionDueAt,resolvedAt,resBreached,ruleId"
+var ackBreaches =
+    sizeOf(tickets filter ((t) -> ackBreached(t)))
 
-var dataLines = if (isNil) [] else tickets map ((t) ->
-    [
-        t.Name default "",
-        if (t.CreatedDate != null) (t.CreatedDate as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}) else "",
-        t.Customer_ID__c default "",
-        t.Customer_Tier__c default "STANDARD",
-        t.Product_Code__c default "",
-        t.Category_Code__c default "",
-        t.Priority__c default "P3",
-        t.Assigned_Team__c default "TRIAGE",
-        "",
-        t.Ticket_Status__c default "NEW",
-        if (t.Acknowledgement_Due_At__c != null) (t.Acknowledgement_Due_At__c as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}) else "",
-        "",
-        "N",
-        if (t.Resolution_Due_At__c != null) (t.Resolution_Due_At__c as String {format: "yyyy-MM-dd'T'HH:mm:ssXXX"}) else "",
-        "",
-        "N",
-        "RR-014"
-    ] joinBy ","
-)
+var resBreaches =
+    sizeOf(tickets filter ((t) -> resBreached(t)))
 
-var trailerLine = "T," ++ (count as String) ++ ",0,0,0," ++ (nilFlag as String) ++ "," ++ genAt
+var defaultRoutes =
+    sizeOf(
+        tickets filter (
+            ((($.Matched_Rule_Id__c default "") as String) == "RR-099")
+        )
+    )
+
+var headerLine =
+    "H,TICKET_REPORT," ++ reportDate ++ "," ++ genAtStr ++ ",v1"
+
+var columnHeaderLine =
+    "ticketId,createdAt,customerId,tier,product,category,priority,team,status,ackDueAt,resolutionDueAt"
+
+var dataLines =
+    if (isNil)
+        []
+    else
+        tickets map ((t) ->
+            [
+                esc(t.Name),
+                esc(fmt(t.CreatedDate)),
+                esc(t.Customer_ID__c),
+                esc(t.Customer_Tier__c),
+                esc(t.Product_Code__c),
+                esc(t.Category_Code__c),
+                esc(t.Priority__c),
+                esc(t.Assigned_Team__c),
+                esc(t.Ticket_Status__c),
+                esc(fmt(t.Acknowledgement_Due_At__c)),
+                esc(fmt(t.Resolution_Due_At__c))
+            ] joinBy ","
+        )
+
+var trailerLine =
+    "T," ++
+    (count as String) ++ "," ++
+    (ackBreaches as String) ++ "," ++
+    (resBreaches as String) ++ "," ++
+    (defaultRoutes as String) ++ "," ++
+    (nilFlag as String) ++ "," ++
+    genAtStr
+
 ---
-(([headerLine, columnHeaderLine] ++ dataLines ++ [trailerLine]) joinBy "\n")]]></ee:set-variable>
+(
+    [headerLine, columnHeaderLine]
+    ++ dataLines
+    ++ [trailerLine]
+) joinBy "\n"]]></ee:set-variable>
             </ee:variables>
         </ee:transform>
 

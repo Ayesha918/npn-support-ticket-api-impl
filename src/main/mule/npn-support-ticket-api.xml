@@ -168,6 +168,14 @@ vars.ticketRequest ++ {
                 <ee:transform doc:name="201 response">
                     <ee:message><ee:set-payload><![CDATA[%dw 2.0
 output application/json
+fun toIst(val) =
+  if (val == null) null
+  else do {
+    var dt = (val as DateTime default null)
+    ---
+    if (dt != null) ((dt >> "+05:30") as String {format: "yyyy-MM-dd'T'HH:mm:ss.SSSXXX"})
+    else (val as String)
+  }
 var t = vars.savedTicket default payload
 ---
 {
@@ -178,9 +186,9 @@ var t = vars.savedTicket default payload
   matchedRuleId: t.matchedRuleId,
   team: t.team,
   targetQueue: t.targetQueue,
-  createdAt: t.createdAt,
-  ackDueAt: t.ackDueAt,
-  resolutionDueAt: t.resolutionDueAt,
+  createdAt: toIst(t.createdAt),
+  ackDueAt: toIst(t.ackDueAt),
+  resolutionDueAt: toIst(t.resolutionDueAt),
   statusUrl: "/api/v1/tickets/" ++ t.ticketId
 }]]></ee:set-payload></ee:message>
                     <ee:variables>
@@ -210,7 +218,7 @@ output application/json
   eventType: "TICKET_ROUTED",
   eventId: "evt-" ++ uuid(),
   correlationId: vars.correlationId,
-  routedAt: now() as String,
+  routedAt: ((now() >> "+05:30") as String {format: "yyyy-MM-dd'T'HH:mm:ss.SSSXXX"}),
   ticketId: vars.savedTicket.ticketId,
   priority: vars.savedTicket.priority,
   team: vars.savedTicket.team,
