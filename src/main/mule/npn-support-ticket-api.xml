@@ -19,7 +19,7 @@
         <http:listener-connection host="${http.host}" port="${http.port}" />
     </http:listener-config>
 
-    <apikit:config name="npn-support-ticket-api-config" api="resource::ec8673e6-03eb-4062-bc33-e6ca888fddea:npn-support-ticket-api:1.0.0:raml:zip:npn-support-ticket-api.raml" outboundHeadersMapName="outboundHeaders" httpStatusVarName="httpStatus" />
+    <apikit:config name="npn-support-ticket-api-config" api="api/npn-support-ticket-api.raml" outboundHeadersMapName="outboundHeaders" httpStatusVarName="httpStatus" />
 
     <!-- Main APIkit Router Flow -->
     <flow name="npn-support-ticket-api-main">

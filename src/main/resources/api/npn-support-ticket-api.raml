@@ -1,0 +1,281 @@
+#%RAML 1.0
+title: npn-support-ticket-api
+description: API for capturing, tracking and updating support tickets
+version: v1
+baseUri: /api/v1
+mediaType: application/json
+
+types:
+
+  Attachment:
+    type: object
+    properties:
+      fileName:
+        type: string
+      sizeBytes:
+        type: integer
+        minimum: 0
+
+  TicketRequest:
+    type: object
+    properties:
+      customerId:
+        type: string
+        minLength: 1
+        maxLength: 20
+      contactChannel:
+        type: string
+        enum:
+          - EMAIL
+          - PHONE
+          - WEB_PORTAL
+      contactEmail:
+        type: string
+        maxLength: 150
+        pattern: ^[^@\s]+@[^@\s]+\.[^@\s]+$
+      productCode:
+        type: string
+        minLength: 1
+        maxLength: 30
+      categoryCode:
+        type: string
+        minLength: 1
+        maxLength: 30
+      statedSeverity:
+        type: string
+        enum:
+          - LOW
+          - MEDIUM
+          - HIGH
+          - CRITICAL
+      subject:
+        type: string
+        minLength: 1
+        maxLength: 200
+      description:
+        type: string
+        minLength: 1
+        maxLength: 4000
+      affectedUserCount:
+        type: integer
+        required: false
+        minimum: 0
+      attachments:
+        type: Attachment[]
+        required: false
+
+  TicketCreateResponse:
+    type: object
+    properties:
+      ticketId:
+        type: string
+      status:
+        type: string
+      priority:
+        type: string
+        enum:
+          - P1
+          - P2
+          - P3
+          - P4
+      priorityReason:
+        type: string
+      matchedRuleId:
+        type: string
+        required: false
+      team:
+        type: string
+      targetQueue:
+        type: string
+      createdAt:
+        type: datetime
+      ackDueAt:
+        type: datetime
+      resolutionDueAt:
+        type: datetime
+      statusUrl:
+        type: string
+
+  DuplicateTicketResponse:
+    type: object
+    properties:
+      ticketId:
+        type: string
+      status:
+        type: string
+      duplicateOfRequestId:
+        type: boolean
+
+  TicketStatusResponse:
+    type: object
+    properties:
+      ticketId:
+        type: string
+      status:
+        type: string
+      priority:
+        type: string
+      team:
+        type: string
+      assignedTo:
+        type: string
+        required: false
+      assignedAt:
+        type: datetime
+        required: false
+      acknowledgedAt:
+        type: datetime
+        required: false
+      ackDueAt:
+        type: datetime
+      ackBreached:
+        type: boolean
+
+  TicketPatchRequest:
+    type: object
+    properties:
+      status:
+        type: string
+        enum:
+          - NEW
+          - UNASSIGNED
+          - ASSIGNED
+          - IN_PROGRESS
+          - PENDING_CUSTOMER
+          - RESOLVED
+          - CLOSED
+          - CANCELLED
+
+  ErrorDetail:
+    type: object
+    properties:
+      field:
+        type: string
+        required: false
+      code:
+        type: string
+      message:
+        type: string
+
+  ErrorResponse:
+    type: object
+    properties:
+      errorCode:
+        type: string
+      message:
+        type: string
+      field:
+        type: string
+        required: false
+      errors:
+        type: ErrorDetail[]
+        required: false
+
+
+/tickets:
+
+  post:
+    description: Create a new support ticket and route it according to database-driven routing rules.
+    headers:
+      X-Request-Id:
+        description: Unique request identifier used for idempotency.
+        type: string
+        required: true
+        minLength: 1
+        maxLength: 64
+    body:
+      application/json:
+        type: TicketRequest
+    responses:
+      201:
+        description: Ticket successfully created.
+        headers:
+          Location:
+            description: URL of the created ticket.
+            type: string
+        body:
+          application/json:
+            type: TicketCreateResponse
+      200:
+        description: Duplicate request. Original ticket is returned.
+        body:
+          application/json:
+            type: DuplicateTicketResponse
+      400:
+        description: Validation failure with field-level errors.
+        body:
+          application/json:
+            type: ErrorResponse
+      422:
+        description: Customer or product is unknown.
+        body:
+          application/json:
+            type: ErrorResponse
+      503:
+        description: Database or required backend service unavailable.
+        headers:
+          Retry-After:
+            description: Seconds to wait before retrying.
+            type: string
+        body:
+          application/json:
+            type: ErrorResponse
+
+  /{ticketId}:
+
+    get:
+      description: Retrieve the current status of a support ticket.
+      responses:
+        200:
+          description: Ticket found.
+          body:
+            application/json:
+              type: TicketStatusResponse
+        404:
+          description: Ticket not found.
+          body:
+            application/json:
+              type: ErrorResponse
+        503:
+          description: Database unavailable.
+          headers:
+            Retry-After:
+              type: string
+          body:
+            application/json:
+              type: ErrorResponse
+
+    patch:
+      description: Update the status of a support ticket according to the allowed state transitions.
+      body:
+        application/json:
+          type: TicketPatchRequest
+      responses:
+        200:
+          description: Ticket successfully updated.
+          body:
+            application/json:
+              type: TicketStatusResponse
+        400:
+          description: Missing or invalid status value.
+          body:
+            application/json:
+              type: ErrorResponse
+        404:
+          description: Ticket not found.
+          body:
+            application/json:
+              type: ErrorResponse
+        409:
+          description: Invalid status transition. Current state is unchanged.
+          body:
+            application/json:
+              type: ErrorResponse
+        503:
+          description: Database unavailable.
+          headers:
+            Retry-After:
+              type: string
+          body:
+            application/json:
+              type: ErrorResponse
